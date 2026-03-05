@@ -1,382 +1,600 @@
-# 📐 TASK 1.3 — Thiết kế Kiến trúc `risk_manager.py`
+# 📐 TASK 2.1 — Thiết Kế Kiến Trúc `strategy_engine.py`
 
-**Date:** 2026-03-05 22:27 UTC+7 | **Branch:** `task-1.3-risk-manager` | **Author:** Antigravity
+**Date:** 2026-03-05 23:00 UTC+7 | **Branch:** `task-2.1-strategy-engine` | **Author:** Antigravity
 **Status:** PENDING TechLead APPROVAL — Chưa code
 
 ---
 
-## 🎯 Nhiệm vụ Core (2 Trụ Cột)
+## 🎯 Mission Statement
 
-`risk_manager.py` chịu trách nhiệm duy nhất: **Không để bot tự phá account**. Hai nhiệm vụ chính:
+`strategy_engine.py` là **Trái Tim** của Rabit_Exness AI — nơi duy nhất quyết định:
+> "Có tín hiệu vào lệnh không? Hướng nào? Chất lượng bao nhiêu?"
 
-1. **Safety Net (Ngắt cầu dao):** Giám sát Balance + Trade History → Kích hoạt emergency stop khi chạm ngưỡng nguy hiểm.
-2. **Position Sizing (Định cỡ lệnh động):** Tính Lot size tự động dựa trên Balance + ATR(14) — mỗi lệnh rủi ro tối đa 3%.
+Module này **KHÔNG** gửi lệnh (đó là việc của `execution.py`).  
+Module này **KHÔNG** quản lý rủi ro (đó là việc của `risk_manager.py`).  
+Module này chỉ làm **1 việc**: Phân tích thị trường đa khung thời gian → Trả về `SignalResult`.
 
 ---
 
-## ⚙️ THIẾT KẾ CLASS `RiskManager` (OOP Architecture)
+## ⚔️ 5 VŨ KHÍ — Kiến Trúc Multi-Timeframe (MTF)
 
 ```
-class RiskManager
+H1  ──────────►  [1] Swing High/Low   +  [2] BOS/CHoCH (Market Structure)
+                       ↓ bias (BUY / SELL / NEUTRAL)
+M15 ──────────►  [3] FVG Scanner (Imbalance Pool, có TTL + max_size=20)
+                       ↓ active FVG zones
+M5  ──────────►  [4] Price Touch FVG  +  [5] Pinbar + VSA Session Baseline
+                       ↓
+               ──►  SignalResult(direction, score, entry, sl, fvg_ref)
+```
+
+**Nguyên tắc bất di bất dịch:**
+- H1 quyết định **xu hướng** (bullish / bearish structure)
+- M15 quyết định **vùng entry** (FVG zone)
+- M5 quyết định **nến trigger** (Pinbar + VSA — timing vào lệnh)
+
+Tất cả tính toán đều trên `data[:-1]` — **candle đã đóng hoàn toàn**. **Chống Repainting tuyệt đối.**
+
+---
+
+## ⚙️ THIẾT KẾ CLASS `StrategyEngine` (OOP Architecture)
+
+```
+class StrategyEngine
 │
 ├─ __init__(config: dict, logger: logging.Logger)
-│       Khởi tạo: initial_balance, daily_drawdown_limit, streak_limit,
-│       balance_floor_pct, max_risk_per_trade_pct, atr_multiplier, logger
-│       Internal state: daily_start_balance, trade_history[], consecutive_losses,
-│       bot_status (ACTIVE/COOLDOWN/PAUSED/HALTED), cooldown_until
+│       Khởi tạo: swing_lookback, fvg_max_size, fvg_ttl_candles,
+│                  pinbar_wick_ratio, vsa_climax_multiplier,
+│                  session_baselines (dict), fvg_pool (list[FVGZone])
 │
-├─ ─────────────── LAYER 1: PER-TRADE RISK ───────────────
+├─ ─────────────── [VŨ KHÍ 1 + 2] H1: MARKET STRUCTURE ───────────────
 │
-├─ calculate_lot_size(balance, atr_value, sl_distance_pips) → float
-│       Công thức Position Sizing:
-│         risk_amount      = balance * max_risk_per_trade_pct        # VD: 500$ * 3% = $15
-│         sl_value_per_lot = sl_distance_pips * pip_value_per_lot    # Exness Cent formula
-│         raw_lot          = risk_amount / sl_value_per_lot
-│         return _floor_lot(raw_lot, volume_step)
+├─ detect_swing_points(h1_data: np.ndarray) → SwingPoints
+│       INPUT:  h1_data[:-1]  ← BỎ nến cuối chưa đóng (anti-repainting)
+│       LOGIC:
+│           Duyệt data[lookback:-1]:
+│               Swing High: high[i] == max(high[i-n : i+n+1])  (n = swing_lookback)
+│               Swing Low:  low[i]  == min(low[i-n  : i+n+1])
+│           Lock điểm Swing sau khi confirmed (không tính lại khi có bar mới)
+│       OUTPUT: SwingPoints(highs=list[PriceLevel], lows=list[PriceLevel])
+│       CRITICAL: Chỉ xác nhận Swing khi CÓ ĐỦ n nến bên phải đã đóng.
+│                 Không dùng nến đang chạy làm điểm xác nhận phải.
 │
-├─ calculate_sl_distance(atr_value, direction: str) → float
-│       sl_distance_pips = ATR(14) * atr_multiplier
-│       Điều chỉnh theo direction (BUY: SL dưới entry, SELL: SL trên entry)
-│       Return: khoảng cách SL tính bằng pips
+├─ detect_market_structure(h1_data: np.ndarray, swings: SwingPoints) → MarketBias
+│       INPUT:  h1_data[:-1], SwingPoints đã confirmed
+│       LOGIC:
+│           BOS  (Break of Structure): Close vượt qua Swing High/Low trước đó
+│                → xác nhận tiếp diễn xu hướng cũ
+│           CHoCH (Change of Character): Close phá vỡ cấu trúc ngược chiều
+│                → đảo chiều xu hướng
+│           Rule: BOS/CHoCH phải do nến ĐÃ ĐÓNG (confirmed close). Không dùng
+│                 giá tick hiện tại để xác nhận BOS/CHoCH.
+│       OUTPUT: MarketBias(
+│                   direction = "BULLISH" | "BEARISH" | "NEUTRAL",
+│                   last_bos_level = float,
+│                   structure_type = "BOS" | "CHoCH" | "NONE"
+│               )
 │
-├─ validate_trade(balance, lot_size, sl_pips) → Tuple[bool, str]
-│       Check 1: lot_size >= symbol_min_volume  → REJECT "LOT_BELOW_MINIMUM"
-│       Check 2: lot_size <= symbol_max_volume  → REJECT "LOT_ABOVE_MAXIMUM"
-│       Check 3: risk_amount <= balance * 0.03  → REJECT "RISK_EXCEEDS_3PCT"
-│       Check 4: bot_status == ACTIVE           → REJECT "BOT_NOT_ACTIVE: {reason}"
-│       return (True, "OK") hoặc (False, reject_reason)
+├─ ─────────────── [VŨ KHÍ 3] M15: FVG SCANNER ───────────────
 │
-├─ _floor_lot(raw_lot: float, volume_step: float) → float
-│       floor về bội số gần nhất của volume_step
-│       return round(floor(raw_lot / volume_step) * volume_step, 8)
+├─ scan_fvg(m15_data: np.ndarray) → list[FVGZone]
+│       INPUT:  m15_data[:-1]  ← chỉ nến đã đóng
+│       LOGIC (Imbalance 3 nến):
+│           for i in range(1, len(data)-1):
+│               candle_left   = data[i-1]  # nến trước
+│               candle_body   = data[i]    # nến giữa (nến lực mạnh)
+│               candle_right  = data[i+1]  # nến sau
 │
-├─ ─────────────── LAYER 2: SAFETY NET (CIRCUIT BREAKER) ───────────────
+│               # FVG Bullish: low[right] > high[left] → gap không được lấp
+│               if candle_right.low > candle_left.high:
+│                   fvg = FVGZone(top=candle_right.low, bottom=candle_left.high,
+│                                 direction="BULLISH", created_at=candle_body.time,
+│                                 ttl_remaining=fvg_ttl_candles)
 │
-├─ on_trade_closed(result: dict) → None
-│       Nhận kết quả mỗi lệnh đóng: {ticket, pnl, close_reason, timestamp}
-│       1. Append vào self.trade_history
-│       2. Gọi _update_streak(pnl)
-│       3. Gọi _check_daily_drawdown(current_balance)
-│       4. Gọi _check_balance_floor(current_balance)
-│       5. Log: [TRADE_CLOSE] ticket | pnl | streak | daily_dd | status
+│               # FVG Bearish: high[right] < low[left] → gap không được lấp
+│               if candle_right.high < candle_left.low:
+│                   fvg = FVGZone(top=candle_left.low, bottom=candle_right.high,
+│                                 direction="BEARISH", created_at=candle_body.time,
+│                                 ttl_remaining=fvg_ttl_candles)
+│       OUTPUT: Danh sách FVGZone mới tìm được trong batch này
 │
-├─ _update_streak(pnl: float) → None
-│       if pnl < 0:
-│           consecutive_losses += 1
-│           if consecutive_losses >= streak_limit:    # mặc định = 3
-│               _trigger_cooldown(reason="STREAK_LIMIT_3")
-│       else:
-│           consecutive_losses = 0                    # Reset khi thắng
+├─ update_fvg_pool(new_fvgs: list[FVGZone], current_price: float) → None
+│       LOGIC:
+│           1. Giảm TTL mỗi nến M15 mới: fvg.ttl_remaining -= 1
+│           2. TẨY FVG quá hạn: xóa fvg nếu ttl_remaining <= 0
+│           3. TẨY FVG đã mitigate: xóa fvg nếu current_price đã chạy qua zone
+│              (BUY FVG: close < fvg.bottom → lấp hết → expired)
+│              (SELL FVG: close > fvg.top   → lấp hết → expired)
+│           4. Thêm FVG mới vào pool
+│           5. MAX SIZE GiỚI HẠN: nếu len(pool) > fvg_max_size → pop FVG cũ nhất (FIFO)
+│       NOTE: Pool được maintain liên tục — không reset giữa các vòng lặp
 │
-├─ _check_daily_drawdown(current_balance: float) → None
-│       daily_dd_pct = (daily_start_balance - current_balance) / daily_start_balance
-│       if daily_dd_pct >= daily_drawdown_limit:      # mặc định = 6%
-│           _trigger_pause(reason=f"DAILY_DD_{daily_dd_pct:.2%}")
+├─ get_active_fvgs(bias: MarketBias) → list[FVGZone]
+│       Trả về FVG còn hiệu lực, cùng hướng với bias H1:
+│           bias=BULLISH → chỉ FVG BULLISH (vùng support, giá có thể bounce lên)
+│           bias=BEARISH → chỉ FVG BEARISH (vùng resistance, giá có thể bounce xuống)
+│           bias=NEUTRAL → return [] (không trade khi structure không rõ)
 │
-├─ _check_balance_floor(current_balance: float) → None
-│       floor_value = initial_balance * balance_floor_pct  # mặc định = 50%
-│       if current_balance <= floor_value:
-│           _trigger_halt(reason=f"BALANCE_FLOOR_{floor_value}")
+├─ ─────────────── [VŨ KHÍ 4 + 5] M5: TRIGGER + VSA ───────────────
 │
-├─ _trigger_cooldown(reason: str) → None   [4 giờ cooldown]
-│       bot_status   = "COOLDOWN"
-│       cooldown_until = datetime.utcnow() + timedelta(hours=4)
-│       log CRITICAL: f"[CIRCUIT_BREAKER] COOLDOWN activated | reason={reason} | resume={cooldown_until}"
-│       # Bot không giao dịch cho đến cooldown_until
+├─ check_price_in_fvg(m5_data: np.ndarray, active_fvgs: list[FVGZone]) → FVGZone | None
+│       INPUT:  m5_data[-2]  ← nến M5 vừa đóng (index -2 là nến cuối đã đóng)
+│       LOGIC:
+│           Lấy last_closed = m5_data[-2]  (KHÔNG dùng m5_data[-1] — đang chạy)
+│           for fvg in active_fvgs:
+│               if fvg.bottom <= last_closed.low <= fvg.top:   # giá chạm vào zone
+│                   return fvg   ← FVG được kích hoạt
+│           return None           ← chưa có trigger
 │
-├─ _trigger_pause(reason: str) → None      [Dừng đến ngày hôm sau]
-│       bot_status   = "PAUSED"
-│       resume_time  = next_day_start_utc()   # 00:00 UTC ngày tiếp theo
-│       cooldown_until = resume_time
-│       log CRITICAL: f"[CIRCUIT_BREAKER] DAILY_PAUSE | reason={reason} | resume={resume_time}"
+├─ validate_pinbar(m5_data: np.ndarray, direction: str) → tuple[bool, float]
+│       INPUT:  m5_data[-2]  ← nến M5 vừa đóng (anti-repainting)
+│       LOGIC:
+│           candle = m5_data[-2]
+│           body_size = abs(candle.close - candle.open)
+│           upper_wick = candle.high - max(candle.open, candle.close)
+│           lower_wick = min(candle.open, candle.close) - candle.low
+│           total_range = candle.high - candle.low
 │
-├─ _trigger_halt(reason: str) → None       [Hard stop — cần can thiệp thủ công]
-│       bot_status = "HALTED"
-│       log CRITICAL: f"[CIRCUIT_BREAKER] HARD_HALT | reason={reason} | MANUAL_INTERVENTION_REQUIRED"
-│       # Không tự phục hồi — admin phải reset thủ công qua config
+│           Tránh chia 0:
+│               if total_range < MIN_CANDLE_RANGE (VD: 2 pips): return False, 0.0
 │
-├─ is_active() → bool
-│       if bot_status == "COOLDOWN" and datetime.utcnow() >= cooldown_until:
-│           bot_status = "ACTIVE"           # Auto-resume sau cooldown window
-│           consecutive_losses = 0         # Reset streak
-│           log INFO: "[CIRCUIT_BREAKER] Cooldown expired — bot ACTIVE"
-│       return bot_status == "ACTIVE"
+│           if direction == "BUY":
+│               # Bullish Pinbar: lower wick dài, body nhỏ ở trên
+│               wick_ratio = lower_wick / total_range  # ≥ 0.60 → qualified
+│               body_ratio = body_size / total_range   # ≤ 0.35 → body nhỏ
+│               is_pinbar  = (wick_ratio >= pinbar_wick_ratio) and (body_ratio <= 0.35)
 │
-├─ reset_daily(new_balance: float) → None  [Gọi mỗi đầu ngày UTC mới]
-│       daily_start_balance = new_balance
-│       if bot_status == "PAUSED":
-│           bot_status = "ACTIVE"          # Resume sau daily pause
-│           log INFO: "[CIRCUIT_BREAKER] Daily reset — bot ACTIVE"
-│       log INFO: f"[DAILY_RESET] daily_start_balance={new_balance}"
+│           if direction == "SELL":
+│               # Bearish Pinbar: upper wick dài, body nhỏ ở dưới
+│               wick_ratio = upper_wick / total_range  # ≥ 0.60 → qualified
+│               body_ratio = body_size / total_range   # ≤ 0.35 → body nhỏ
+│               is_pinbar  = (wick_ratio >= pinbar_wick_ratio) and (body_ratio <= 0.35)
 │
-└─ get_status_report() → dict
-        return {
-            "bot_status":          bot_status,
-            "consecutive_losses":  consecutive_losses,
-            "daily_dd_pct":        daily_drawdown_pct (float),
-            "balance_floor_value": initial_balance * balance_floor_pct,
-            "cooldown_until":      cooldown_until (str|None),
-            "today_trades":        số lệnh hôm nay (int),
-        }
+│           return (is_pinbar, wick_ratio)
+│
+├─ validate_vsa(m5_data: np.ndarray, current_time: datetime) → tuple[bool, float]
+│       INPUT:  m5_data[-2]  ← nến M5 vừa đóng
+│       LOGIC:
+│           1. Xác định session hiện tại từ current_time (UTC):
+│               London:  07:00–12:00 → baseline = session_baselines["LONDON"]
+│               NY:      13:00–17:00 → baseline = session_baselines["NY"]
+│               Other:   baseline = session_baselines["GLOBAL"]  (fallback)
+│
+│           2. Lấy tick_volume của nến cuối đóng: vol = m5_data[-2].tick_volume
+│
+│           3. Tính baseline động theo session:
+│               vol_window = m5_data[-51:-1].tick_volume  ← 50 nến cuối đã đóng
+│               session_mean = mean(vol_window)           ← trung bình theo session
+│               session_std  = std(vol_window)
+│
+│           4. Climax check: vol >= session_mean * vsa_climax_multiplier
+│               (default multiplier = 1.5 → volume >= 1.5x trung bình session)
+│
+│           5. Chống Climax ảo: nếu session mới bắt đầu < 3 nến → chưa đủ data
+│               → return False, 0.0  (không trade phiên đầu)
+│
+│           6. Tính VSA score (0.0–1.0):
+│               score = min(vol / (session_mean * vsa_climax_multiplier), 1.0)
+│
+│           return (is_climax, vsa_score)
+│
+├─ ─────────────── ORCHESTRATOR: ĐIỀU PHỐI TOÀN BỘ ───────────────
+│
+├─ analyze(h1_data, m15_data, m5_data, current_time) → SignalResult
+│       ⚡ Hàm DUY NHẤT được gọi từ main.py (mỗi tick M5 mới đóng)
+│
+│       STEP 1  [H1] Market Structure
+│           swings = detect_swing_points(h1_data)
+│           bias   = detect_market_structure(h1_data, swings)
+│           if bias.direction == "NEUTRAL": return SignalResult.no_signal()
+│
+│       STEP 2  [M15] FVG Update
+│           new_fvgs = scan_fvg(m15_data)
+│           update_fvg_pool(new_fvgs, current_price=m5_data[-2].close)
+│           active_fvgs = get_active_fvgs(bias)
+│           if not active_fvgs: return SignalResult.no_signal()
+│
+│       STEP 3  [M5] Check FVG Touch
+│           triggered_fvg = check_price_in_fvg(m5_data, active_fvgs)
+│           if triggered_fvg is None: return SignalResult.no_signal()
+│
+│       STEP 4  [M5] Pinbar Validation
+│           is_pin, pin_score = validate_pinbar(m5_data, bias.direction)
+│           if not is_pin: return SignalResult.no_signal()
+│
+│       STEP 5  [M5] VSA Validation
+│           is_climax, vsa_score = validate_vsa(m5_data, current_time)
+│           if not is_climax: return SignalResult.no_signal()
+│
+│       STEP 6  Composite Signal Score
+│           signal_score = _composite_score(pin_score, vsa_score, bias, triggered_fvg)
+│           if signal_score < MIN_SIGNAL_SCORE: return SignalResult.no_signal()
+│
+│       STEP 7  Calculate Entry/SL (M5)
+│           entry, sl = _calculate_entry_sl(m5_data[-2], bias.direction, triggered_fvg)
+│
+│       return SignalResult(
+│           direction   = bias.direction,
+│           score       = signal_score,
+│           entry_price = entry,
+│           sl_price    = sl,
+│           fvg_ref     = triggered_fvg,
+│           structure   = bias.structure_type,
+│           pinbar_ratio= pin_score,
+│           vsa_score   = vsa_score,
+│       )
+│
+├─ _composite_score(pin_score, vsa_score, bias, fvg) → float
+│       Điểm tổng hợp 0.0–1.0:
+│           w_pinbar    = 0.40  → chất lượng hình dạng nến
+│           w_vsa       = 0.35  → xác nhận khối lượng
+│           w_structure = 0.25  → độ mạnh BOS/CHoCH
+│
+│           structure_score = 1.0 if bias.structure_type == "BOS" else 0.7
+│           score = w_pinbar * pin_score + w_vsa * vsa_score + w_structure * structure_score
+│           return round(score, 4)
+│
+└─ _calculate_entry_sl(candle, direction, fvg) → tuple[float, float]
+        if direction == "BUY":
+            entry = candle.close           # Entry tại close của Pinbar M5
+            sl    = fvg.bottom - buffer   # SL dưới đáy FVG (buffer = 2 pips)
+        if direction == "SELL":
+            entry = candle.close
+            sl    = fvg.top + buffer      # SL trên đỉnh FVG
+        return (entry, sl)
 ```
 
 ---
 
-## 🏦 CÔNG THỨC TÍNH pip_value_per_lot — Exness Cent Account
-
-Đây là phần **kỹ thuật đặc thù** của Exness Cent mà nhiều bot hay tính sai:
-
-### Exness Standard Cent — Quy đổi đơn vị
-
-Exness Cent sử dụng **Cent USD (USC)** thay vì USD thật:
-- 1 Lot Cent = 1,000 Cent units (= 10 USD units tương đương về lot)
-- Giá trị 1 pip với 1 Lot Standard trên EURUSDc: **0.10 USD** (thay vì $10 trên tài khoản Standard thường)
+## 📦 DATA CONTAINERS — TypeSafe
 
 ```python
-# Tính pip value per lot cho Exness Standard Cent — EURUSDc
-# pip_size = 0.0001 (4 chữ số thập phân)
-# contract_size_cent = 100,000 Cent units / lot
-
-# Cách ĐÚNG: Dùng mt5.symbol_info() để lấy giá trị thực tế
-def _get_pip_value_per_lot(symbol: str) -> float:
-    """
-    Trả về giá trị tiền tệ (USD) của 1 pip với 1 Lot chuẩn.
-    Tự động lấy từ MT5 API — tránh hardcode sai.
-    
-    Công thức:
-        pip_value_per_lot = pip_size * contract_size * tick_value / tick_size
-        Hoặc đơn giản hơn: dùng symbol_info().trade_tick_value đã được MT5 scale sẵn.
-    """
-    info = mt5.symbol_info(symbol)
-    if info is None:
-        raise ValueError(f"Cannot get symbol info for {symbol}")
-    
-    # trade_tick_value: giá trị tiền tệ của 1 tick với 1 lot (MT5 đã quy đổi về deposit currency)
-    # trade_tick_size: kích thước 1 tick (VD: 0.00001 cho EURUSDc 5 digits)
-    pip_size = info.point * 10            # 1 pip = 10 points (cho 5-digit broker)
-    pip_value_per_lot = (pip_size / info.trade_tick_size) * info.trade_tick_value
-    return pip_value_per_lot
-
-# Ví dụ thực tế với EURUSDc trên Exness Cent:
-# trade_tick_size  = 0.00001
-# trade_tick_value = 0.01 (USD — vì Cent lot nhỏ hơn 100x)
-# pip_size         = 0.0001
-# pip_value_per_lot = (0.0001 / 0.00001) * 0.01 = 10 * 0.01 = 0.10 USD/pip/lot
-```
-
-### Công thức Position Sizing hoàn chỉnh
-
-```
-Ví dụ minh họa:
-  balance              = 200 USD (Cent account)
-  max_risk_per_trade   = 3%
-  risk_amount          = 200 * 0.03 = 6 USD
-  atr_value            = 0.00150 (15 pips)
-  atr_multiplier       = 1.5
-  sl_distance_pips     = 15 pips * 1.5 = 22.5 pips
-  pip_value_per_lot    = 0.10 USD/pip/lot   (Exness Cent EURUSDc)
-
-  raw_lot = risk_amount / (sl_distance_pips * pip_value_per_lot)
-          = 6 / (22.5 * 0.10)
-          = 6 / 2.25
-          = 2.67 lots (Cent lots)
-
-  Sau floor_lot (volume_step = 0.01):
-  final_lot = 2.67 → 2.67 lots Cent ✓
-  
-  Verify lại: 2.67 * 22.5 * 0.10 = 6.0075 USD ≈ 6 USD ✓ (≤ 3% balance)
-```
-
----
-
-## 🔀 FLOW NGẮT CẦU DAO — State Machine Diagram
-
-```
-                    ┌──────────────────────────┐
-                    │         ACTIVE           │
-                    │  (Giao dịch bình thường) │
-                    └──────────┬───────────────┘
-                               │ on_trade_closed()
-                               ▼
-              ┌────────────────────────────────────┐
-              │         KIỂM TRA 3 NGƯỠNG          │
-              │   (mỗi khi có lệnh đóng)           │
-              └──┬─────────────┬──────────────┬────┘
-                 │             │              │
-    [consecutive │   [daily_dd │  [balance ≤  │
-     losses ≥ 3] │   ≥ 6%]    │   50% init]  │
-                 ▼             ▼              ▼
-          ┌──────────┐  ┌──────────┐  ┌──────────┐
-          │ COOLDOWN │  │  PAUSED  │  │  HALTED  │
-          │ (4 giờ)  │  │ (đến sáng│  │(vĩnh viễn│
-          │          │  │ UTC tiếp)│  │cho đến   │
-          │          │  │          │  │admin fix)│
-          └────┬─────┘  └────┬─────┘  └──────────┘
-               │             │
-    [4h trôi   │  [00:00 UTC │
-     qua]      │  ngày tiếp] │
-               ▼             ▼
-          ┌──────────────────────────┐
-          │         ACTIVE           │
-          │      (Auto-resume)       │
-          └──────────────────────────┘
-
-HALTED: Không tự động resume.
-        Admin phải chạy: risk_manager.manual_reset(confirmed=True)
-```
-
----
-
-## 📐 CẤU TRÚC FILE & CONFIG
-
-### `risk_manager.py` — Cấu trúc đề xuất
-
-```python
-# risk_manager.py
-# Khoảng ~300 dòng (production-ready, type hints)
-
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from math import floor
 from typing import Optional
-import logging
-import MetaTrader5 as mt5
+from datetime import datetime
 
 @dataclass
-class TradeResult:
-    ticket:       int
-    pnl:          float
-    close_reason: str
-    timestamp:    datetime
+class FVGZone:
+    """Fair Value Gap — một vùng imbalance M15."""
+    top:           float              # Mức giá trên của gap
+    bottom:        float              # Mức giá dưới của gap
+    direction:     str                # "BULLISH" | "BEARISH"
+    created_at:    datetime           # Thời điểm nến giữa đóng
+    ttl_remaining: int                # Số nến M15 còn lại (đếm ngược từ fvg_ttl_candles)
 
-class RiskManager:
-    # Constants — có thể override qua config dict
-    DEFAULT_DAILY_DD_LIMIT       = 0.06   # 6%
-    DEFAULT_STREAK_LIMIT         = 3
-    DEFAULT_BALANCE_FLOOR_PCT    = 0.50   # 50% initial
-    DEFAULT_MAX_RISK_PER_TRADE   = 0.03   # 3%
-    DEFAULT_ATR_MULTIPLIER       = 1.5
-    
-    def __init__(self, config: dict, initial_balance: float, logger: logging.Logger): ...
-    def calculate_lot_size(self, balance, atr_value, sl_pips) -> float: ...
-    def calculate_sl_distance(self, atr_value, direction) -> float: ...
-    def validate_trade(self, balance, lot_size, sl_pips) -> tuple[bool, str]: ...
-    def on_trade_closed(self, result: TradeResult) -> None: ...
-    def is_active(self) -> bool: ...
-    def reset_daily(self, new_balance: float) -> None: ...
-    def get_status_report(self) -> dict: ...
-    def manual_reset(self, confirmed: bool) -> bool: ...   # Chỉ dùng cho HALTED state
-    
-    # Private helpers
-    def _floor_lot(self, raw_lot, volume_step) -> float: ...
-    def _get_pip_value_per_lot(self, symbol) -> float: ...
-    def _update_streak(self, pnl) -> None: ...
-    def _check_daily_drawdown(self, current_balance) -> None: ...
-    def _check_balance_floor(self, current_balance) -> None: ...
-    def _trigger_cooldown(self, reason) -> None: ...
-    def _trigger_pause(self, reason) -> None: ...
-    def _trigger_halt(self, reason) -> None: ...
+    @property
+    def midpoint(self) -> float:
+        return (self.top + self.bottom) / 2
+
+    @property
+    def is_expired(self) -> bool:
+        return self.ttl_remaining <= 0
+
+
+@dataclass
+class PriceLevel:
+    """Một điểm Swing High hoặc Swing Low đã confirmed."""
+    price:        float
+    bar_index:    int
+    level_type:   str   # "HIGH" | "LOW"
+    confirmed_at: int   # bar_index của nến xác nhận phải (đã đóng)
+
+
+@dataclass
+class SwingPoints:
+    highs: list[PriceLevel] = field(default_factory=list)
+    lows:  list[PriceLevel] = field(default_factory=list)
+
+
+@dataclass
+class MarketBias:
+    direction:      str    # "BULLISH" | "BEARISH" | "NEUTRAL"
+    last_bos_level: float  # Mức giá BOS/CHoCH gần nhất
+    structure_type: str    # "BOS" | "CHoCH" | "NONE"
+
+
+@dataclass
+class SignalResult:
+    """Output của StrategyEngine.analyze() — truyền sang main.py."""
+    has_signal:    bool    # True = có tín hiệu, False = không
+    direction:     str     # "BUY" | "SELL" | ""
+    score:         float   # Composite score 0.0–1.0
+    entry_price:   float
+    sl_price:      float
+    fvg_ref:       Optional[FVGZone] = None
+    structure:     str    = ""    # "BOS" | "CHoCH"
+    pinbar_ratio:  float  = 0.0
+    vsa_score:     float  = 0.0
+
+    @staticmethod
+    def no_signal() -> "SignalResult":
+        return SignalResult(has_signal=False, direction="", score=0.0,
+                            entry_price=0.0, sl_price=0.0)
 ```
 
-### `config/risk_config.json`
+---
 
-```json
-{
-  "symbol": "EURUSDc",
-  "initial_balance": 200.0,
-  "risk_per_trade_pct": 0.03,
-  "atr_multiplier": 1.5,
-  "safety_net": {
-    "daily_drawdown_limit_pct": 0.06,
-    "consecutive_loss_streak": 3,
-    "cooldown_hours": 4,
-    "min_balance_floor_pct": 0.50
-  },
-  "volume": {
-    "min_lot": 0.01,
-    "max_lot": 100.0,
-    "volume_step": 0.01
-  }
-}
+## 🔐 ANTI-REPAINTING — Quy tắc Vàng
+
+Đây là điểm **khác biệt sinh tử** giữa một strategy chạy được live và một strategy đẹp trên backtest nhưng chết tiền thật.
+
+| Nơi tính | Data slice dùng | Lý do |
+|----------|-----------------|-------|
+| `detect_swing_points()` | `h1_data[:-1]` | Nến H1 cuối đang chạy, swing chưa confirmed |
+| `detect_market_structure()` | `h1_data[:-1]` | BOS/CHoCH cần confirmed close |
+| `scan_fvg()` | `m15_data[:-1]` | FVG cần 3 nến đã đóng hoàn toàn |
+| `check_price_in_fvg()` | `m5_data[-2]` | index -1 đang chạy, -2 là nến cuối đã đóng |
+| `validate_pinbar()` | `m5_data[-2]` | Pinbar cần nến đã đóng để tính tỷ lệ wick/body |
+| `validate_vsa()` | `m5_data[-51:-1]` | 50 nến đã đóng (không bao gồm nến đang chạy -1) |
+
+> **Rule of thumb:** Bất kỳ line nào dùng `data[-1]` cho tính toán signal → **BUG REPAINTING**. CI/CD sẽ có unit test kiểm tra điều này.
+
+---
+
+## ⚡ CHI TIẾT KỸ THUẬT — 3 Điểm Sắc Bén
+
+### [KỸTHUẬT-1] FVG Pool Management — Chống Memory Leak
+
+FVG Pool là `list[FVGZone]` được maintain **xuyên suốt** vòng đời bot (không reset mỗi bar):
+
+```
+Mỗi khi M15 có bar mới đóng, gọi update_fvg_pool():
+
+    [BƯỚC 1] Giảm TTL toàn bộ FVG hiện tại:
+                for fvg in self.fvg_pool: fvg.ttl_remaining -= 1
+
+    [BƯỚC 2] Xóa FVG expired:
+                self.fvg_pool = [f for f in self.fvg_pool if not f.is_expired]
+
+    [BƯỚC 3] Xóa FVG đã bị lấp (mitigated):
+                BUY zone:  xóa nếu current_price < fvg.bottom (giá đã xuyên qua đáy)
+                SELL zone: xóa nếu current_price > fvg.top    (giá đã xuyên qua đỉnh)
+
+    [BƯỚC 4] Thêm FVG mới (từ scan_fvg kết quả)
+
+    [BƯỚC 5] Cắt pool nếu full:
+                while len(self.fvg_pool) > self.fvg_max_size:
+                    self.fvg_pool.pop(0)   ← FIFO: xóa FVG cũ nhất
+
+Tham số mặc định:
+    fvg_max_size    = 20 zones   → giới hạn bộ nhớ
+    fvg_ttl_candles = 48         → 48 nến M15 = 12 giờ thị trường
+```
+
+### [KỸTHUẬT-2] VSA Session Baseline — Chống Climax Ảo
+
+Volume trong session London Open lúc 08:00 UTC luôn cao hơn Asian session. Nếu dùng MA20 toàn cục sẽ luôn báo climax sai lúc mở phiên:
+
+```
+Session boundaries (UTC):
+    LONDON:  07:00–12:00  → tính baseline trên 50 nến M5 trong session này
+    NY:      13:00–17:00  → tính baseline trên 50 nến M5 trong session này
+    GLOBAL:  fallback      → tính baseline 50 nến M5 gần nhất (bất kể session)
+
+Logic:
+    1. Xác định session từ current_time.hour
+    2. Filter m5_data[-201:-1] lấy các nến thuộc cùng session
+    3. Nếu có đủ ≥ 10 nến cùng session → tính mean/std riêng
+    4. Nếu < 10 nến cùng session (phiên mới bắt đầu) → dùng GLOBAL baseline
+    5. Climax = volume >= session_mean * vsa_climax_multiplier
+
+Lợi ích: Không bao giờ báo "climax" ở phiên Asian volume thấp
+         khi so sánh với London volume cao.
+```
+
+### [KỸTHUẬT-3] Swing High/Low Confirmation — Lookback Đối Xứng
+
+Swing phải được xác nhận bởi **n nến bên phải đã đóng** (default `swing_lookback = 3`):
+
+```
+Swing High tại index i:
+    ĐIỀU KIỆN: high[i] > high[i-1], high[i-2], high[i-3]   ← bên TRÁI
+               high[i] > high[i+1], high[i+2], high[i+3]   ← bên PHẢI (đã đóng!)
+
+    CONFIRMED chỉ khi: current_bar_index >= i + swing_lookback
+    
+    Tức là: nếu current index = 100, swing_lookback = 3
+            → Swing tại index 96 mới có thể confirmed (vì 97, 98, 99 đã đóng)
+            → Swing tại index 98 CHƯA confirmed (chỉ có 99 đóng, thiếu 100, 101)
+
+Lý do KHÔNG dùng dữ liệu tương lai (lookahead bias):
+    Trong live trading, nến i+1 chưa tồn tại → bất kỳ logic nào dùng high[i+1]
+    trong REALTIME đều là REPAINTING, dù backtest kết quả đẹp.
 ```
 
 ---
 
 ## 📋 BẢNG TỔNG KẾT HÀM & TRÁCH NHIỆM
 
-| Hàm | Layer | Trách nhiệm | Notes |
-|-----|-------|-------------|-------|
-| `calculate_lot_size()` | Position Sizing | Tính lot từ balance + ATR SL | Public API |
-| `calculate_sl_distance()` | Position Sizing | ATR * multiplier = SL pips | Public API |
-| `validate_trade()` | Validation | Kiểm tra lot hợp lệ + bot active | Public API |
-| `on_trade_closed()` | Safety Net | Điểm vào duy nhất sau đóng lệnh | Public API |
-| `is_active()` | Safety Net | Check + auto-resume cooldown | Public API |
-| `reset_daily()` | Safety Net | Reset balance chuẩn + resume PAUSED | Main gọi 00:00 UTC |
-| `get_status_report()` | Monitoring | Trả dict cho dashboard/log | Public API |
-| `manual_reset()` | Recovery | Unlock HALTED state | Admin only |
-| `_floor_lot()` | Utility | round(..., 8) tránh INVALID_VOLUME | ← FIX 3 từ Task 1.2 |
-| `_get_pip_value_per_lot()` | Utility | Dùng MT5 API, không hardcode | Exness Cent formula |
-| `_update_streak()` | Circuit Breaker | Đếm thua liên tiếp → COOLDOWN | Auto |
-| `_check_daily_drawdown()` | Circuit Breaker | DD ≥ 6% → PAUSED | Auto |
-| `_check_balance_floor()` | Circuit Breaker | Balance ≤ 50% init → HALTED | Auto |
-| `_trigger_cooldown()` | Circuit Breaker | 4h pause, log CRITICAL | Auto |
-| `_trigger_pause()` | Circuit Breaker | Until 00:00 UTC next day | Auto |
-| `_trigger_halt()` | Circuit Breaker | Permanent stop, manual needed | Auto |
+| Hàm | Timeframe | Input Data | Anti-Repainting | Output |
+|-----|-----------|------------|-----------------|--------|
+| `detect_swing_points()` | H1 | `h1[:-1]` | ✅ | `SwingPoints` |
+| `detect_market_structure()` | H1 | `h1[:-1]` | ✅ | `MarketBias` |
+| `scan_fvg()` | M15 | `m15[:-1]` | ✅ | `list[FVGZone]` |
+| `update_fvg_pool()` | M15 | current_price | N/A | None (side-effect) |
+| `get_active_fvgs()` | M15 | bias | N/A | `list[FVGZone]` |
+| `check_price_in_fvg()` | M5 | `m5[-2]` | ✅ | `FVGZone \| None` |
+| `validate_pinbar()` | M5 | `m5[-2]` | ✅ | `(bool, float)` |
+| `validate_vsa()` | M5 | `m5[-51:-1]` | ✅ | `(bool, float)` |
+| `_composite_score()` | — | scores + bias | N/A | `float (0–1)` |
+| `_calculate_entry_sl()` | M5 | candle + fvg | N/A | `(entry, sl)` |
+| `analyze()` | MTF | H1+M15+M5 | ✅ (orchestrator) | `SignalResult` |
 
 ---
 
-## 📡 LOGGING SCHEMA
+## 🏗️ CẤU TRÚC FILE ĐỀ XUẤT
+
+```python
+# strategy_engine.py
+# Ước ~500–600 dòng (production-ready, type hints đầy đủ)
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Optional
+import logging
+import numpy as np
+
+# Data containers (FVGZone, PriceLevel, SwingPoints, MarketBias, SignalResult)
+# ...
+
+class StrategyEngine:
+    # Constants mặc định — override bởi config dict
+    DEFAULT_SWING_LOOKBACK        = 3
+    DEFAULT_FVG_MAX_SIZE          = 20
+    DEFAULT_FVG_TTL_CANDLES       = 48    # 48 nến M15 = 12 giờ
+    DEFAULT_PINBAR_WICK_RATIO     = 0.60  # lower/upper wick >= 60% total range
+    DEFAULT_VSA_CLIMAX_MULTIPLIER = 1.5   # volume >= 1.5x session mean
+    DEFAULT_MIN_SIGNAL_SCORE      = 0.55  # Composite score tối thiểu để ra signal
+    DEFAULT_FVG_BUFFER_PIPS       = 2     # buffer khi tính SL so với FVG boundary
+
+    def __init__(self, config: dict, logger: logging.Logger): ...
+    def analyze(self, h1_data, m15_data, m5_data, current_time) -> SignalResult: ...
+    def detect_swing_points(self, h1_data: np.ndarray) -> SwingPoints: ...
+    def detect_market_structure(self, h1_data: np.ndarray, swings: SwingPoints) -> MarketBias: ...
+    def scan_fvg(self, m15_data: np.ndarray) -> list[FVGZone]: ...
+    def update_fvg_pool(self, new_fvgs: list[FVGZone], current_price: float) -> None: ...
+    def get_active_fvgs(self, bias: MarketBias) -> list[FVGZone]: ...
+    def check_price_in_fvg(self, m5_data: np.ndarray, active_fvgs: list[FVGZone]) -> Optional[FVGZone]: ...
+    def validate_pinbar(self, m5_data: np.ndarray, direction: str) -> tuple[bool, float]: ...
+    def validate_vsa(self, m5_data: np.ndarray, current_time: datetime) -> tuple[bool, float]: ...
+
+    # Private helpers
+    def _composite_score(self, pin_score, vsa_score, bias, fvg) -> float: ...
+    def _calculate_entry_sl(self, candle, direction, fvg) -> tuple[float, float]: ...
+    def _get_session(self, utc_hour: int) -> str: ...
+```
+
+### `config/strategy_config.json`
+
+```json
+{
+  "symbol": "EURUSDc",
+  "swing_lookback": 3,
+  "fvg": {
+    "max_size": 20,
+    "ttl_candles": 48,
+    "buffer_pips": 2
+  },
+  "pinbar": {
+    "wick_ratio_min": 0.60,
+    "body_ratio_max": 0.35,
+    "min_candle_range_pips": 2
+  },
+  "vsa": {
+    "climax_multiplier": 1.5,
+    "min_session_candles": 10
+  },
+  "signal": {
+    "min_composite_score": 0.55
+  },
+  "sessions": {
+    "london": [7, 12],
+    "ny":     [13, 17]
+  }
+}
+```
+
+---
+
+## 🔀 FLOW PHÂN TÍCH ĐA KHUNG THỜI GIAN
 
 ```
-[2026-03-05 15:30:00 UTC] - [INFO]     - [RiskManager] - Lot size calculated | balance=200.0 | atr=0.00150 | sl_pips=22.5 | pip_val=0.10 | raw_lot=2.67 | final_lot=2.67
-[2026-03-05 15:35:00 UTC] - [INFO]     - [RiskManager] - Trade validated OK | lot=2.67 | risk=6.0 USD | risk_pct=3.00%
-[2026-03-05 16:00:00 UTC] - [WARNING]  - [RiskManager] - [TRADE_CLOSE] ticket=12345 | pnl=-5.20 | streak=1 | daily_dd=2.60%
-[2026-03-05 16:30:00 UTC] - [WARNING]  - [RiskManager] - [TRADE_CLOSE] ticket=12346 | pnl=-4.80 | streak=2 | daily_dd=5.00%
-[2026-03-05 17:00:00 UTC] - [WARNING]  - [RiskManager] - [TRADE_CLOSE] ticket=12347 | pnl=-3.10 | streak=3 | daily_dd=6.55%
-[2026-03-05 17:00:00 UTC] - [CRITICAL] - [RiskManager] - [CIRCUIT_BREAKER] DAILY_PAUSE | reason=DAILY_DD_6.55% | resume=2026-03-06 00:00:00 UTC
-[2026-03-05 17:00:00 UTC] - [CRITICAL] - [RiskManager] - [CIRCUIT_BREAKER] COOLDOWN activated | reason=STREAK_LIMIT_3 | resume=2026-03-05 21:00:00 UTC
-[2026-03-06 00:00:01 UTC] - [INFO]     - [RiskManager] - [DAILY_RESET] daily_start_balance=187.90 | status: PAUSED → ACTIVE
+main.py gọi strategy_engine.analyze() mỗi khi M5 có nến mới đóng:
+
+                ┌─────────────────────────────────┐
+                │       analyze() ENTRY POINT     │
+                │   (kích hoạt mỗi M5 bar close)  │
+                └──────────────┬──────────────────┘
+                               │
+                    ┌──────────▼──────────┐
+                    │  [H1] Market Struct │
+                    │  detect_swing_points│
+                    │  + market_structure │
+                    └──────────┬──────────┘
+                               │ bias = BULLISH/BEARISH
+                               │ (NEUTRAL → EXIT early)
+                    ┌──────────▼──────────┐
+                    │  [M15] FVG Scanner  │
+                    │  scan_fvg() +       │
+                    │  update_fvg_pool()  │
+                    │  get_active_fvgs()  │
+                    └──────────┬──────────┘
+                               │ active_fvgs[]
+                               │ (empty → EXIT early)
+                    ┌──────────▼──────────┐
+                    │  [M5] Price in FVG? │
+                    │  check_price_in_fvg │
+                    └──────────┬──────────┘
+                               │ triggered_fvg
+                               │ (None → EXIT early)
+                    ┌──────────▼──────────┐
+                    │  [M5] Pinbar valid? │
+                    │  validate_pinbar()  │
+                    └──────────┬──────────┘
+                               │ pin_score
+                               │ (False → EXIT early)
+                    ┌──────────▼──────────┐
+                    │  [M5] VSA Climax?   │
+                    │  validate_vsa()     │
+                    └──────────┬──────────┘
+                               │ vsa_score
+                               │ (False → EXIT early)
+                    ┌──────────▼──────────────────────┐
+                    │  Composite Score                 │
+                    │  score = 40%pin+35%vsa+25%struct │
+                    │  if score >= 0.55 → SIGNAL!      │
+                    └──────────┬───────────────────────┘
+                               │
+                    ┌──────────▼──────────┐
+                    │  Calculate Entry/SL │
+                    │  → SignalResult     │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+              SignalResult(direction, score, entry, sl, fvg_ref)
+                               │
+                               ▼
+                          main.py → risk_manager → execution.py
 ```
 
 ---
 
-## ⚡ ĐIỂM QUAN TRỌNG — Tích hợp với `execution.py`
-
-`RiskManager` sẽ được gọi từ `main.py` State Machine theo flow:
+## 📡 LOGGING SCHEMA — `strategy_engine.py`
 
 ```
-[SIGNAL_FOUND] state:
-    1. risk_mgr.is_active()                           ← Check bot status
-    2. sl_pips = risk_mgr.calculate_sl_distance(atr)  ← Tính SL distance
-    3. lot    = risk_mgr.calculate_lot_size(bal, atr, sl_pips)  ← Tính lot
-    4. ok, reason = risk_mgr.validate_trade(bal, lot, sl_pips)  ← Validate
-    5. if ok: → chuyển state [PENDING_ORDER] → execution.py.send_order(lot, sl_pips)
-       else:  → log REJECT reason → về [IDLE]
-
-[CLOSING] state (sau khi lệnh đóng):
-    6. risk_mgr.on_trade_closed(TradeResult(...))     ← Safety Net check
-    7. if not risk_mgr.is_active(): log + về [IDLE] (không scan signal mới)
+[2026-03-06 08:15:00 UTC] - [DEBUG]   - [StrategyEngine] - H1 Swing Points: highs=3 lows=4 | last_swing_high=1.0923 low=1.0887
+[2026-03-06 08:15:00 UTC] - [INFO]    - [StrategyEngine] - H1 Market Bias: BULLISH | structure=BOS | level=1.0923
+[2026-03-06 08:15:00 UTC] - [DEBUG]   - [StrategyEngine] - M15 FVG pool: active=5 | expired_this_bar=1 | new_found=2
+[2026-03-06 08:15:05 UTC] - [INFO]    - [StrategyEngine] - M5 FVG Touch! zone=BULLISH[1.0905–1.0912] | price=1.0908 | candle_low=1.0906
+[2026-03-06 08:15:05 UTC] - [INFO]    - [StrategyEngine] - Pinbar validated | wick_ratio=0.72 | body_ratio=0.18 | direction=BUY ✓
+[2026-03-06 08:15:05 UTC] - [INFO]    - [StrategyEngine] - VSA: session=LONDON | vol=1248 | mean=834 | ratio=1.496x | CLIMAX ✓
+[2026-03-06 08:15:05 UTC] - [INFO]    - [StrategyEngine] - SIGNAL GENERATED | dir=BUY | score=0.712 | entry=1.0910 | sl=1.0902 | fvg=[1.0905–1.0912]
 ```
 
 ---
 
-## 🚦 NGƯỠNG CẦU DAO — Tóm tắt 3 Lớp
+## ❓ ĐIỂM CẦN TECHLED CLARIFY TRƯỚC KHI CODE
 
-| Ngưỡng | Giá trị | Hành động | Recovery |
-|--------|---------|-----------|----------|
-| `consecutive_loss_streak` | 3 lệnh thua liên tiếp | COOLDOWN 4 giờ | Auto-resume sau 4h |
-| `daily_drawdown_limit` | 6% balance trong ngày | PAUSED đến 00:00 UTC hôm sau | Auto-resume ngày mới |
-| `min_balance_floor` | Balance ≤ 50% vốn ban đầu | HALTED — vĩnh viễn | Manual admin reset |
-
----
-
-## ❓ CÂU HỎI CẦN TECHLED CLARIFY TRƯỚC KHI CODE
-
-1. **ATR Multiplier mặc định:** Plan ghi "ATR(14) * Hệ số" — TechLead muốn hệ số mặc định là **1.5** hay khác?
-2. **initial_balance:** Nên đọc từ `risk_config.json` hay fetch từ `mt5.account_info().balance` lúc bot khởi động?
-3. **HALTED recovery:** `manual_reset()` chỉ reset qua code, hay cần một config flag để admin set từ file mà không cần restart bot?
-4. **Nhiều lệnh đồng thời (tương lai):** Khi nới `max_open_trades > 1`, công thức sizing có cần điều chỉnh `risk_per_trade / max_open_trades` không?
+1. **swing_lookback mặc định = 3:** Với H1 timeframe, 3 nến bên phải = 3 giờ xác nhận. Có cần tăng lên 5 để tránh swing giả (false swing) không?
+2. **FVG TTL = 48 nến M15:** Tương đương 12 giờ thị trường. TechLead muốn ngắn hơn (24 nến = 6h) hay dài hơn (96 nến = 24h)?
+3. **MIN_SIGNAL_SCORE = 0.55:** Cần backtest để calibrate. Đây là threshold khởi đầu — TechLead muốn thêm adaptive threshold (điều chỉnh theo session) hay giữ cố định?
+4. **FVG Touch Logic:** Hiện tại check `candle.low <= fvg.top AND candle.low >= fvg.bottom` — tức là giá chỉ cần **chạm vào zone** (không cần đóng cửa bên trong). TechLead muốn nghiêm hơn: `candle.close bên trong zone` không?
+5. **VSA Climax Multiplier = 1.5x:** Đây là multiplier so với session mean. Có muốn thêm lớp check thứ hai: `volume > previous_candle.volume * 1.2` (nến sau to hơn nến trước) để filter thêm không?
 
 ---
 
-*Thiết kế bởi Antigravity — 2026-03-05 22:27 UTC+7 | Branch: task-1.3-risk-manager | PENDING TechLead APPROVAL*
+## 📊 MA TRẬN KỸ THUẬT — Rủi Ro Và Giải Pháp
+
+| Rủi ro | Giải pháp đã thiết kế |
+|--------|----------------------|
+| Swing Repainting (lookback bias) | Tất cả dùng `data[:-1]`, Swing require n nến phải đã đóng |
+| FVG Memory Leak | max_size=20 (FIFO), TTL=48 candles |
+| FVG Stale (quá cũ) | TTL càng giảm mỗi bar M15, expired → tự xóa |
+| VSA Climax ảo (session mism.) | Session baseline riêng (London/NY/Global) |
+| Tín hiệu nhiều nhưng chất thấp | Composite score >= 0.55 gate, 3 filter liên tiếp |
+| BOS/CHoCH giả (intrabar) | Chỉ tính khi candle close, không intrabar tick |
+| FVG Touch nhạy quá | Buffer pips khi tính SL, not entry |
+
+---
+
+*Thiết kế bởi Antigravity — 2026-03-05 23:00 UTC+7 | Branch: task-2.1-strategy-engine | PENDING TechLead APPROVAL*
