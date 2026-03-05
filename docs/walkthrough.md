@@ -625,3 +625,49 @@ RabitScal/
 ---
 
 *Cập nhật bởi Antigravity — 2026-03-05 22:00 UTC+7 | Branch: task-1.1-data-pipeline*
+
+---
+
+> **📌 SOP UPDATE (TechLead — 2026-03-05 22:00):** Từ đây, `walkthrough.md` CHỈ ghi tóm tắt ngắn (≤7 bullets/task, append-only). Phân tích chi tiết viết vào `docs/walkthrough.md.resolved` (overwrite mỗi task mới).
+
+---
+
+## ✅ Task 1.1 HOÀN TẤT — `data_pipeline.py` (TechLead APPROVED)
+
+**Date:** 2026-03-05 22:00 UTC+7 | **Branch:** `task-1.1-data-pipeline` → merged `main`
+
+- Tạo `data_pipeline.py`: Class `DataPipeline` OOP, ~650 dòng, type hints + docstrings đầy đủ.
+- Kiến trúc: `ThreadPoolExecutor(max_workers=3)` kéo H1/M15/M5 **song song hoàn toàn**; Daemon Thread heartbeat/30s độc lập — không block Main Thread.
+- `mt5_reconnect()`: exponential backoff `[1,2,4,8,16,32,60]s` tối đa 10 lần, log mỗi attempt.
+- `validate_candles()`: Data Quality Score 0–1 (None/gap/OHLC/volume/count), score <0.60 skip, <0.30 trigger reconnect.
+- `is_session_active()`: London 07-12 / NY 13-17 UTC; skip Asian 21-05 UTC.
+- `_detect_server_tz()`: auto-detect Exness UTC offset (UTC+2/+3), normalize timestamp về UTC tuyệt đối.
+- Tạo `requirements.txt` (3 nhóm: Core Trading / Web Dashboard / ML) + `config/pipeline_config.json`.
+
+---
+
+## 🔄 Task 1.2: `execution.py` — Design Phase (TechLead APPROVED + 3 Fixes)
+
+**Date:** 2026-03-05 22:11 UTC+7 | **Branch:** `task-1.2-execution`
+
+- Thiết kế Class `OrderManager` OOP: `send_order()`, `check_spread()`, `calculate_order_params()`, `validate_order_params()`, `_handle_retcode()`, `_log_trade()`.
+- Fill-or-Kill: retry tối đa 3 lần, mỗi lần fetch `bid/ask` realtime → tính lại `Entry/SL/TP` mới.
+- TechLead phát hiện **3 lỗi chí mạng** và yêu cầu fix trước khi code: (1) thêm `magic_number` vào TradeRequest, (2) gắn `sl/tp` trực tiếp vào `order_send()` (không OrderModify sau), (3) làm tròn `lot` theo `volume_step` tránh `INVALID_VOLUME`.
+- Log lý do từ chối: `SPREAD_TOO_HIGH` / `REQUOTE_MAX` / `TIMEOUT` / `BROKER_LIMIT`.
+- Output: `data/trade_log.csv` (ticket, slippage_pips, spread, commission, reject_reason, attempts).
+
+*Phân tích kiến trúc chi tiết: `docs/walkthrough.md.resolved`*
+
+---
+
+## ✅ Task 1.2: `execution.py` — Implementation HOÀN TẤT (TechLead APPROVED)
+
+**Date:** 2026-03-05 22:27 UTC+7 | **Branch:** `task-1.2-execution` → merged `main`
+
+- `execution.py` hoàn chỉnh ~650 dòng: Class `OrderManager`, type hints, docstrings đầy đủ.
+- **FIX 1:** Thêm `magic_number=20250305` vào `MqlTradeRequest` — phân biệt lệnh bot vs tay.
+- **FIX 2:** `sl/tp` gắn trực tiếp vào `order_send()` (không dùng `ORDER_MODIFY` sau) — ngăn race condition SL/TP.
+- **FIX 3:** `_floor_lot()` làm tròn xuống theo `volume_step` bằng `round(..., 8)` — tránh `INVALID_VOLUME`.
+- Fill-or-Kill: retry ≤3 lần, mỗi lần fetch `bid/ask` realtime, tính lại `Entry/SL/TP` mới.
+- Spread Gate: kiểm tra `spread < MAX_SPREAD_PIPS` trước khi gửi lệnh.
+- Output: `data/trade_log.csv` (ticket, slippage_pips, spread, commission, reject_reason, attempts).

@@ -2,6 +2,11 @@
 Date: 2026-03-05 | Branch: task-0-init-plan
 Action: Phân tích phản biện Master Plan 5 giai đoạn, ghi nhận các rủi ro tiềm ẩn (bottleneck hiệu năng, slippage Exness Cent, loop ML race condition, thiếu circuit breaker), đề xuất bổ sung Safety Net Layer và State Machine. Tạo docs/walkthrough.md và Plan.md.
 
-[[PHASE 1][Task 1.1]] Build Data Pipeline - Lý do: Xây dựng module kéo dữ liệu từ MT5. Tối ưu kiến trúc Đa luồng (Multithreading) để tận dụng 56 Threads của Dual CPU Xeon.
-Date: 2026-03-05 | Branch: task-1.1-data-pipeline
-Action: Thiết kế kiến trúc Class DataPipeline với ThreadPoolExecutor(max_workers=3) để kéo H1/M15/M5 song song hoàn toàn, Daemon Thread heartbeat độc lập, exponential backoff reconnect, session filter (London/NY), data validator (None/gap/UTC). Viết phân tích kiến trúc vào docs/walkthrough.md. PENDING: code data_pipeline.py sau khi TechLead review thiết kế.
+[[PHASE 1][Task 1.1]] Build Data Pipeline — DONE (TechLead APPROVED)
+Date: 2026-03-05 | Branch: task-1.1-data-pipeline → merged main
+Action: Code data_pipeline.py (Class DataPipeline, ThreadPoolExecutor(3), Daemon heartbeat, mt5_reconnect() exponential backoff, validate_candles() Quality Score, session filter London/NY, UTC normalize). Tạo requirements.txt (3 nhóm) + config/pipeline_config.json.
+
+[[PHASE 1][Task 1.2]] Build Execution Layer - Lý do: Thiết kế module thực thi lệnh chịu được ma sát thị trường thực tế (Spread, Slippage, Commission Exness Cent).
+Date: 2026-03-05 | Branch: task-1.2-execution
+Action: Phân tích yêu cầu execution.py từ Plan.md v1.1. Thiết kế Class OrderManager với Fill-or-Kill (max 3 retry, tính lại Entry/SL/TP mỗi retry), kiểm tra Spread realtime, Slippage model, log từ chối lệnh (REQUOTE/TIMEOUT/SPREAD_TOO_HIGH). PENDING: chờ TechLead review thiết kế trước khi code.
+

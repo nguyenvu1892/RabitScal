@@ -1,0 +1,1 @@
+timestamp_utc,ticket,signal_id,symbol,direction,lot,entry_requested,fill_price,sl,tp,spread_at_entry_pips,slippage_pips,commission,reject_reason,attempts,source_tf,magic
