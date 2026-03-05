@@ -770,3 +770,15 @@ RabitScal/
 - **Chart library:** Plotly.js (per TechLead directive) — FVG box dùng `shapes`, không cần hack.
 - **Bind:** `127.0.0.1:8888` — SSH tunnel để access từ ngoài.
 
+
+---
+
+## 🔄 Task 5.2 — Frontend Complete + Backend Fixed (PENDING TechLead snippet review)
+
+**Date:** 2026-03-06 01:31 UTC+7 | **Branch:** `task-5.2-dashboard`
+
+- **Fix `/api/candles`:** Đọc từ `DataPipeline.get_data(tf)` trước (RAM, zero MT5 call). Convert numpy structured ndarray → Plotly format. Chỉ fallback `mt5.copy_rates_from_pos()` khi pipeline `None`. Response thêm `source: "pipeline_cache"|"mt5_direct"` để debug.
+- **`set_pipeline()`:** Inject DataPipeline reference trước khi spawn uvicorn thread. `_pipeline_ref` global được set 1 lần tại `BotOrchestrator._start_dashboard()`.
+- **`templates/index.html`** (262 dòng): Dark theme CSS variables, grid 3-row/2-col layout, Plotly.js v2 CDN, 5 side-panel cards (BotState, Equity, DD Gauge, Open Trade, Last Signal), trade history table.
+- **`static/js/dashboard.js`** (625 dòng): Plotly candlestick init từ `/api/candles`, volume bars, 7 WS event handlers, `drawFVGBox()` dùng Plotly `layout.shapes` (rectangle), SL/TP horizontal lines (`xref:'paper'`), Entry arrow annotations, WS exponential backoff reconnect.
+

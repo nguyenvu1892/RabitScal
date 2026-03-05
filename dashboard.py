@@ -60,6 +60,24 @@ EVENT_QUEUE_SIZE  = 500   # max events in queue before discard
 logger = logging.getLogger("Dashboard")
 
 # ---------------------------------------------------------------------------
+# Pipeline Reference — Injected by BotOrchestrator via set_pipeline()
+# ---------------------------------------------------------------------------
+
+_pipeline_ref = None   # DataPipeline instance — set sau khi BotOrchestrator init
+
+
+def set_pipeline(pipeline) -> None:
+    """
+    Inject DataPipeline reference vào dashboard module.
+    Gọi từ BotOrchestrator.__init__() sau khi self.pipeline được tạo.
+    Thread-safe: chỉ ghi 1 lần dừi module-level variable.
+    """
+    global _pipeline_ref
+    _pipeline_ref = pipeline
+    logger.info("[Dashboard] DataPipeline reference injected")
+
+
+# ---------------------------------------------------------------------------
 # Shared State — populated by BotOrchestrator via dashboard_pub.publish()
 # ---------------------------------------------------------------------------
 
@@ -223,6 +241,52 @@ def _build_snapshot() -> dict:
         "ts":      int(time.time()),
         "payload": dict(_shared_state),
     }
+
+
+def _candles_from_pipeline(symbol: str, tf: str, limit: int) -> dict | None:
+    """
+    Đọc OHLCV từ DataPipeline cache trước (RAM, zero MT5 call).
+    DataPipeline trả về numpy structured ndarray với fields:
+        time, open, high, low, close, tick_volume, ...
+
+    Returns:
+        Plotly-compatible dict {x, open, high, low, close, volume}
+        None nếu pipeline chưa sẵn sàng hoặc không có data cho tf.
+    """
+    if _pipeline_ref is None:
+        return None
+
+    try:
+        # get_data() là thread-safe (dùng RLock nội bộ)
+        # Trả về numpy structured ndarray hoặc None
+        rates = _pipeline_ref.get_data(tf.upper())
+        if rates is None or len(rates) == 0:
+            return None
+
+        # Anti-repainting: bỏ nến cuối (nến đang chạy chưa đóng)
+        rates = rates[:-1] if len(rates) > 1 else rates
+
+        # Clamp theo limit (lấy limit nến cuối)
+        if len(rates) > limit:
+            rates = rates[-limit:]
+
+        # Numpy structured array → Plotly-compatible dict
+        # rates["time"] = unix timestamp (seconds)
+        times = [
+            datetime.fromtimestamp(int(t), tz=timezone.utc).isoformat()
+            for t in rates["time"]
+        ]
+        return {
+            "x":      times,
+            "open":   [float(v) for v in rates["open"]],
+            "high":   [float(v) for v in rates["high"]],
+            "low":    [float(v) for v in rates["low"]],
+            "close":  [float(v) for v in rates["close"]],
+            "volume": [int(v)   for v in rates["tick_volume"]],
+        }
+    except Exception as e:
+        logger.warning(f"[Dashboard] Pipeline candles error ({tf}): {e}")
+        return None
 
 
 def _mt5_candles_to_plotly(rates) -> dict:
@@ -393,51 +457,50 @@ async def get_candles(
     limit:  int = 500,
 ):
     """
-    Fetch M5 OHLCV candle data từ MT5 cho Plotly candlestick chart.
+    Fetch M5 OHLCV cho Plotly candlestick chart.
 
-    Response format tương thích trực tiếp với:
-        Plotly.newPlot('chart', [{
-            type: 'candlestick',
-            x:     data.x,
-            open:  data.open,
-            high:  data.high,
-            low:   data.low,
-            close: data.close,
-        }])
+    Ưu tiên đọc từ DataPipeline cache (RAM, zero MT5 call).
+    Chỉ fallback sang mt5.copy_rates_from_pos() khi pipeline chưa ready.
 
-    Logic:
-        1. Gọi mt5.copy_rates_from_pos() để lấy candles mới nhất.
-        2. Convert sang Plotly-compatible format (ISO datetime strings).
-        3. Trả về JSON. Frontend dùng trực tiếp.
+    Điều này ngăn spam MT5 Terminal khi user F5 liên tục.
     """
-    limit = max(10, min(limit, 2000))   # Clamp: 10 – 2000
+    limit = max(10, min(limit, 2000))
 
     try:
-        # MT5 phải đã initialize từ BotOrchestrator
-        data = _fetch_candles_from_mt5(symbol, tf, limit)
+        # ƯU TIÊN 1: Đọc từ DataPipeline cache (no MT5 call)
+        data = _candles_from_pipeline(symbol, tf, limit)
 
-        if not data["x"]:
-            # MT5 chưa connect hoặc symbol sai — trả empty với thông báo rõ
-            return JSONResponse(
-                content={
-                    "error":  f"No data returned from MT5 for {symbol}/{tf}",
-                    "tip":    "Ensure MT5 is connected and BotOrchestrator is running",
-                    "x": [], "open": [], "high": [], "low": [], "close": [], "volume": [],
-                },
-                status_code=200,
+        if data is not None:
+            source = "pipeline_cache"
+
+        else:
+            # FALLBACK: Pipeline chưa ready, gọi MT5 trực tiếp
+            logger.info(
+                f"[Dashboard] Pipeline cache miss ({symbol}/{tf}) — "
+                f"falling back to mt5.copy_rates_from_pos()"
             )
+            data = _fetch_candles_from_mt5(symbol, tf, limit)
+            source = "mt5_direct"
+
+        if not data or not data.get("x"):
+            return JSONResponse(content={
+                "error":  f"No data for {symbol}/{tf} — MT5 connected?",
+                "source": source if 'source' in dir() else "unknown",
+                "x": [], "open": [], "high": [], "low": [], "close": [], "volume": [],
+            }, status_code=200)
 
         return JSONResponse(content={
             "symbol": symbol,
             "tf":     tf,
             "count":  len(data["x"]),
-            **data,                    # x, open, high, low, close, volume
+            "source": source,
+            **data,
         })
 
     except Exception as e:
         logger.error(f"[Dashboard] /api/candles error: {e}", exc_info=True)
         return JSONResponse(
-            content={"error": str(e), "x": [], "open": [], "high": [], "low": [], "close": [], "volume": []},
+            content={"error": str(e), "x": []},
             status_code=500,
         )
 

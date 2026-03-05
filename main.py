@@ -44,10 +44,11 @@ from strategy_engine import StrategyEngine, SignalResult
 
 # Dashboard — import với fallback để bot vẫn chạy nếu dashboard bị lỗi
 try:
-    from dashboard import dashboard_pub, start_dashboard_server
+    from dashboard import dashboard_pub, start_dashboard_server, set_pipeline as _dash_set_pipeline
     _DASHBOARD_AVAILABLE = True
 except ImportError:
     _DASHBOARD_AVAILABLE = False
+    def _dash_set_pipeline(*a, **kw): pass   # no-op fallback
     class _NullPub:             # Null-object pattern: publish() là no-op
         def publish(self, *a, **kw): pass
     dashboard_pub = _NullPub()
@@ -771,6 +772,9 @@ class BotOrchestrator:
             daemon    = True,
             name      = "DashboardServer",
         )
+        # Inject DataPipeline reference TRƯỚC khi uvicorn start
+        # (uvicorn chạy async — không thể inject sau vì event loop đã khởi chạy)
+        _dash_set_pipeline(self.pipeline)
         dash_thread.start()
         self.logger.info(
             f"[BotOrchestrator] Dashboard started | http://{host}:{port}"
