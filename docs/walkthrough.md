@@ -799,3 +799,18 @@ RabitScal/
 - `templates/index.html` (262 dòng): Grid layout dark theme, Plotly CDN, 5 panel cards
 - `static/js/dashboard.js` (625 dòng): Plotly init, drawFVGBox() shapes API, WS 7-event handler, WS auto-reconnect exponential backoff
 
+---
+
+## 🔄 Task 4.2: `ml_model.py` — ML Training Loop Hoàn Thiện
+
+**Date:** 2026-03-06 02:01 UTC+7 | **Branch:** `task-4.2-ml-training`
+
+- **Bổ sung `objective(trial)`** top-level, picklable — không bị ẩn trong factory closure. Khai báo đầy đủ 9 chiều tham số:
+  - ATR group: `atr_sl_multiplier` (0.8–3.0), `atr_lot_multiplier` (0.005–0.05), `atr_fvg_buffer` (0.3–1.5)
+  - VSA group: `vsa_volume_ratio` (1.2–3.0), `vsa_neighbor_ratio` (1.1–2.0), `vsa_min_score` (0.3–0.6)
+  - Pinbar group: `pinbar_wick_ratio` (0.50–0.75), `pinbar_body_ratio` (0.10–0.40)
+  - Gate: `composite_score_gate` (0.45–0.75)
+- **Score formula:** `WR^0.60 × PF^0.40 × dd_penalty` — `dd_penalty = 1 − (max_dd / max_dd_limit)²`. TrialPruned ngay nếu DD ≥ 15% hoặc trade_count < 200.
+- **Bổ sung `run_optimization()`** standalone entry point: `optuna.create_study` SQLite backend (`data/optuna_study.db`, hỗ trợ `--resume`), khởi động `ProcessPoolExecutor(max_workers=48)` → bypass GIL hoàn toàn trên 56 luồng Xeon.
+- **`_OPT_CONTEXT`** module-level dict: set bởi `run_optimization()` trước khi study chạy — giữ `objective` picklable cho subprocess workers.
+

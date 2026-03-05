@@ -401,6 +401,51 @@ def run_backtest_fast(
 
 
 # ---------------------------------------------------------------------------
+# Trial Worker — Pure numpy function, NO SQLite access (pickle-safe)
+# ---------------------------------------------------------------------------
+
+def _run_trial_worker(args: tuple) -> dict:
+    """
+    Worker function cho Ask-and-Tell pattern.
+    Nhận tuple (params, data, max_dd_limit, min_trades), chạy backtest numpy.
+    KHÔNG bao giờ truy cập SQLite — chỉ main thread được phép chạm study.
+
+    Args:
+        args: (params_dict, data_ndarray, max_dd_limit, min_trades)
+
+    Returns:
+        dict với keys: status ('ok'|'pruned'|'error'), score (float), error (str)
+    """
+    params, data, max_dd_limit, min_trades = args
+    try:
+        result = run_backtest_fast(data, params)
+
+        # Hard prune check
+        if result.max_drawdown >= max_dd_limit or result.trade_count < min_trades:
+            return {"status": "pruned"}
+
+        # Score: WR^0.60 × PF^0.40 × dd_penalty
+        dd_penalty = 1.0 - (result.max_drawdown / max_dd_limit) ** 2
+        score      = (
+            (result.winrate       ** WR_WEIGHT) *
+            (result.profit_factor ** PF_WEIGHT) *
+            max(dd_penalty, 0.0)
+        )
+        return {
+            "status":        "ok",
+            "score":         score,
+            "winrate":       result.winrate,
+            "profit_factor": result.profit_factor,
+            "max_drawdown":  result.max_drawdown,
+            "trade_count":   result.trade_count,
+        }
+    except optuna.exceptions.TrialPruned:
+        return {"status": "pruned"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
 # Optuna Objective (chạy trong subprocess worker)
 # ---------------------------------------------------------------------------
 
@@ -505,6 +550,220 @@ def _build_objective(
 
     return objective
 
+
+# ---------------------------------------------------------------------------
+# Top-Level Public API — objective(trial) & run_optimization()
+# Task 4.2: Các hàm entry point rõ ràng để kickstart ML training loop
+# ---------------------------------------------------------------------------
+
+# Module-level context: được set bởi run_optimization() trước khi study chạy
+# Dùng pattern này thay vì closure để top-level function có thể được pickle
+# (cần thiết khi Optuna gọi objective trong subprocess)
+_OPT_CONTEXT: dict = {}
+
+
+def objective(trial: optuna.Trial) -> float:
+    """
+    Hàm Objective chuẩn Optuna — top-level, picklable, dùng trực tiếp với study.optimize().
+
+    Khai báo toàn bộ không gian tham số (9 chiều) cho chiến lược SMC+VSA:
+        ─ ATR group    : atr_sl_multiplier, atr_lot_multiplier, atr_fvg_buffer
+        ─ VSA group    : vsa_volume_ratio, vsa_neighbor_ratio, vsa_min_score
+        ─ Pinbar group : pinbar_wick_ratio, pinbar_body_ratio
+        ─ Gate         : composite_score_gate
+
+    Score = WR^0.60 × PF^0.40 × dd_penalty
+        • dd_penalty = 1 − (max_dd / max_dd_limit)²
+        • TrialPruned ngay khi DD ≥ 15% hoặc trade_count < min_trades
+
+    Context phải được set trước (bởi run_optimization):
+        _OPT_CONTEXT = {
+            "data":          np.ndarray,   # Full M5 OHLCV
+            "max_dd_limit":  float,        # e.g. 0.15
+            "min_trades":    int,          # e.g. 200
+        }
+    """
+    ctx          = _OPT_CONTEXT
+    data         = ctx["data"]
+    max_dd_limit = ctx.get("max_dd_limit", DEFAULT_MAX_DD_LIMIT)
+    min_trades   = ctx.get("min_trades",   DEFAULT_MIN_TRADES)
+
+    # ── Suggest tham số (9 chiều) ──────────────────────────────────────────
+    params = {
+        # ATR group — kiểm soát khoảng cách SL và kích thước FVG tối thiểu
+        "atr_sl_multiplier":    trial.suggest_float("atr_sl_multiplier",    0.8,  3.0),
+        "atr_lot_multiplier":   trial.suggest_float("atr_lot_multiplier",   0.005, 0.05),
+        "atr_fvg_buffer":       trial.suggest_float("atr_fvg_buffer",       0.3,  1.5),
+
+        # VSA group — ngưỡng lọc volume climax (2-layer filter)
+        "vsa_volume_ratio":     trial.suggest_float("vsa_volume_ratio",     1.2,  3.0),
+        "vsa_neighbor_ratio":   trial.suggest_float("vsa_neighbor_ratio",   1.1,  2.0),
+        "vsa_min_score":        trial.suggest_float("vsa_min_score",        0.3,  0.6),
+
+        # Pinbar group — tỷ lệ wick/body xác nhận đảo chiều
+        "pinbar_wick_ratio":    trial.suggest_float("pinbar_wick_ratio",    0.50, 0.75),
+        "pinbar_body_ratio":    trial.suggest_float("pinbar_body_ratio",    0.10, 0.40),
+
+        # Composite gate — ngưỡng tổng hợp để ra signal (SMC+VSA+Pinbar)
+        "composite_score_gate": trial.suggest_float("composite_score_gate", 0.45, 0.75),
+    }
+
+    # ── Chạy backtest vectorized ────────────────────────────────────────────
+    try:
+        result = run_backtest_fast(data, params)
+    except optuna.exceptions.TrialPruned:
+        raise
+
+    # ── Hard prune nếu không đủ điều kiện ──────────────────────────────────
+    if result.max_drawdown >= max_dd_limit or result.trade_count < min_trades:
+        raise optuna.exceptions.TrialPruned()
+
+    # ── Score tổng hợp: WR^0.60 × PF^0.40 × dd_penalty ───────────────────
+    dd_penalty      = 1.0 - (result.max_drawdown / max_dd_limit) ** 2
+    composite_score = (
+        (result.winrate       ** WR_WEIGHT) *
+        (result.profit_factor ** PF_WEIGHT) *
+        max(dd_penalty, 0.0)
+    )
+
+    logger.debug(
+        f"[Trial {trial.number}] "
+        f"WR={result.winrate:.3f} PF={result.profit_factor:.3f} "
+        f"DD={result.max_drawdown:.3f} trades={result.trade_count} "
+        f"score={composite_score:.4f}"
+    )
+
+    return composite_score
+
+
+def run_optimization(
+    data:         np.ndarray,
+    *,
+    n_trials:     int   = DEFAULT_N_TRIALS,
+    n_workers:    int   = DEFAULT_N_WORKERS,
+    max_dd_limit: float = DEFAULT_MAX_DD_LIMIT,
+    min_trades:   int   = DEFAULT_MIN_TRADES,
+    resume:       bool  = False,
+) -> optuna.Study:
+    """
+    Entry point standalone để khởi chạy ML training loop.
+
+    ✅ ASK-AND-TELL PATTERN (Task 4.2 Fix):
+        Chỉ Main Thread được phép chạm SQLite (study.ask / study.tell).
+        ProcessPoolExecutor workers chỉ thuần túy tính numpy — không bao giờ
+        truy cập DB → triệt tiêu hoàn toàn lỗi "database is locked".
+
+    Execution model:
+        Loop mỗi batch n_workers trials:
+            1. Main thread: study.ask() × n_workers  → batch of FrozenTrials
+            2. Main thread: extract params dict từ mỗi trial
+            3. executor.map(_run_trial_worker, params_batch) → workers tính numpy song song
+            4. Main thread: study.tell(trial, value) cho từng kết quả nhận về
+
+    Args:
+        data:         np.ndarray shape (N, 6) — M5 OHLCV data
+        n_trials:     Số Optuna trials (default: 500)
+        n_workers:    Số CPU workers ProcessPoolExecutor (default: 48)
+        max_dd_limit: Max drawdown cho phép để không prune trial (default: 0.15)
+        min_trades:   Số lệnh tối thiểu để trial hợp lệ (default: 200)
+        resume:       True → load study cũ từ SQLite; False → tạo mới
+
+    Returns:
+        optuna.Study đã optimize xong — .best_trial, .best_params sẵn sàng
+    """
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    storage_url = f"sqlite:///{STUDY_DB_PATH}"
+    sampler     = optuna.samplers.TPESampler(seed=42, n_startup_trials=20)
+    pruner      = optuna.pruners.MedianPruner(n_startup_trials=20, n_warmup_steps=0)
+
+    # ── Khởi tạo / Resume Optuna Study (chỉ main thread) ───────────────────
+    if resume:
+        logger.info(f"[run_optimization] Resuming study from: {storage_url}")
+        study = optuna.load_study(
+            study_name=STUDY_NAME,
+            storage=storage_url,
+            sampler=sampler,
+        )
+    else:
+        study = optuna.create_study(
+            study_name=STUDY_NAME,
+            direction="maximize",
+            storage=storage_url,      # SQLite — chỉ main thread chạm
+            sampler=sampler,
+            pruner=pruner,
+            load_if_exists=True,
+        )
+
+    n_done      = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
+    n_remaining = max(0, n_trials - n_done)
+
+    logger.info(
+        f"[run_optimization] Study ready | "
+        f"done={n_done} remaining={n_remaining} "
+        f"workers={n_workers} storage={storage_url}"
+    )
+
+    if n_remaining == 0:
+        logger.info("[run_optimization] All trials already complete — skipping optimize")
+        return study
+
+    # ── ASK-AND-TELL LOOP với ProcessPoolExecutor ───────────────────────────
+    # Nguyên tắc: Study (SQLite) ← CHỈ Main Thread; Workers ← chỉ tính numpy
+    # Batch size = n_workers → mỗi vòng lặp lấp đầy tất cả cores trong 1 lần
+    logger.info(
+        f"[run_optimization] Launching Ask-and-Tell loop | "
+        f"max_workers={n_workers} | batch_size={n_workers} | n_trials={n_remaining}"
+    )
+
+    completed = 0
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        while completed < n_remaining:
+            batch_size = min(n_workers, n_remaining - completed)
+
+            # ── STEP 1: Main Thread ask() batch trials từ study ────────────
+            # study.ask() không cần objective function; chỉ sample params
+            frozen_trials = [study.ask() for _ in range(batch_size)]
+
+            # Extract params dict từ mỗi FrozenTrial (chưa có value)
+            params_batch = [ft.params for ft in frozen_trials]
+
+            # Package args cho worker: (params, data, max_dd_limit, min_trades)
+            worker_args = [
+                (p, data, max_dd_limit, min_trades)
+                for p in params_batch
+            ]
+
+            # ── STEP 2: Workers tính numpy song song (không chạm SQLite) ───
+            results = list(executor.map(_run_trial_worker, worker_args))
+
+            # ── STEP 3: Main Thread tell() kết quả về study (SQLite) ────────
+            for frozen_trial, res in zip(frozen_trials, results):
+                if res["status"] == "pruned":
+                    study.tell(frozen_trial, state=optuna.trial.TrialState.PRUNED)
+                elif res["status"] == "error":
+                    logger.warning(
+                        f"[run_optimization] Trial {frozen_trial.number} error: "
+                        f"{res.get('error')}"
+                    )
+                    study.tell(frozen_trial, state=optuna.trial.TrialState.PRUNED)
+                else:
+                    study.tell(frozen_trial, res["score"])
+
+            completed += batch_size
+            best_val = study.best_value if study.best_trial else float("nan")
+            logger.info(
+                f"[run_optimization] Progress {completed}/{n_remaining} trials | "
+                f"best_score={best_val:.4f}"
+            )
+
+    logger.info(
+        f"[run_optimization] Complete | "
+        f"best_score={study.best_value:.4f} | "
+        f"best_params={study.best_params}"
+    )
+
+    return study
 
 # ---------------------------------------------------------------------------
 # Data Fetcher — MT5 → numpy cache
