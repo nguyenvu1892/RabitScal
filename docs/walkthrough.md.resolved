@@ -1,343 +1,382 @@
-# 📐 RESOLVED — Task 1.2: Thiết kế kiến trúc `execution.py`
+# 📐 TASK 1.3 — Thiết kế Kiến trúc `risk_manager.py`
 
-> **[LUẬT SOP]** File này là bản nháp phân tích chi tiết cho task **HIỆN TẠI**.
-> Sẽ bị **XÓA TRẮNG và ghi đè** khi sang Task 1.3.
-> Tóm tắt ngắn đọc tại `docs/walkthrough.md`.
-
-**Date:** 2026-03-05 22:00 UTC+7
-**Branch:** `task-1.2-execution`
-**Plan ref:** `Plan.md v1.1 — Giai đoạn 1: execution.py — Order Execution Layer`
-**Author:** Antigravity (Senior AI Coder)
+**Date:** 2026-03-05 22:27 UTC+7 | **Branch:** `task-1.3-risk-manager` | **Author:** Antigravity
+**Status:** PENDING TechLead APPROVAL — Chưa code
 
 ---
 
-## 1. PHÂN TÍCH YÊU CẦU TỪ PLAN.MD v1.1
+## 🎯 Nhiệm vụ Core (2 Trụ Cột)
 
-Trích từ `Plan.md`, Section `execution.py — Order Execution Layer`:
+`risk_manager.py` chịu trách nhiệm duy nhất: **Không để bot tự phá account**. Hai nhiệm vụ chính:
+
+1. **Safety Net (Ngắt cầu dao):** Giám sát Balance + Trade History → Kích hoạt emergency stop khi chạm ngưỡng nguy hiểm.
+2. **Position Sizing (Định cỡ lệnh động):** Tính Lot size tự động dựa trên Balance + ATR(14) — mỗi lệnh rủi ro tối đa 3%.
+
+---
+
+## ⚙️ THIẾT KẾ CLASS `RiskManager` (OOP Architecture)
 
 ```
-- [REVISED v1.1] Kiểm tra spread realtime trước khi gửi lệnh:
-    nếu spread > MAX_SPREAD_PIPS → abort
-- [REVISED v1.1] Implement Fill-or-Kill:
-    retry tối đa MAX_RETRY=3, mỗi retry tính lại Entry/SL/TP từ giá mới
-- Tính Commission và Dynamic Spread vào Entry/SL/TP
-- Ghi log lý do từ chối lệnh: REQUOTE / TIMEOUT / SPREAD_TOO_HIGH
+class RiskManager
+│
+├─ __init__(config: dict, logger: logging.Logger)
+│       Khởi tạo: initial_balance, daily_drawdown_limit, streak_limit,
+│       balance_floor_pct, max_risk_per_trade_pct, atr_multiplier, logger
+│       Internal state: daily_start_balance, trade_history[], consecutive_losses,
+│       bot_status (ACTIVE/COOLDOWN/PAUSED/HALTED), cooldown_until
+│
+├─ ─────────────── LAYER 1: PER-TRADE RISK ───────────────
+│
+├─ calculate_lot_size(balance, atr_value, sl_distance_pips) → float
+│       Công thức Position Sizing:
+│         risk_amount      = balance * max_risk_per_trade_pct        # VD: 500$ * 3% = $15
+│         sl_value_per_lot = sl_distance_pips * pip_value_per_lot    # Exness Cent formula
+│         raw_lot          = risk_amount / sl_value_per_lot
+│         return _floor_lot(raw_lot, volume_step)
+│
+├─ calculate_sl_distance(atr_value, direction: str) → float
+│       sl_distance_pips = ATR(14) * atr_multiplier
+│       Điều chỉnh theo direction (BUY: SL dưới entry, SELL: SL trên entry)
+│       Return: khoảng cách SL tính bằng pips
+│
+├─ validate_trade(balance, lot_size, sl_pips) → Tuple[bool, str]
+│       Check 1: lot_size >= symbol_min_volume  → REJECT "LOT_BELOW_MINIMUM"
+│       Check 2: lot_size <= symbol_max_volume  → REJECT "LOT_ABOVE_MAXIMUM"
+│       Check 3: risk_amount <= balance * 0.03  → REJECT "RISK_EXCEEDS_3PCT"
+│       Check 4: bot_status == ACTIVE           → REJECT "BOT_NOT_ACTIVE: {reason}"
+│       return (True, "OK") hoặc (False, reject_reason)
+│
+├─ _floor_lot(raw_lot: float, volume_step: float) → float
+│       floor về bội số gần nhất của volume_step
+│       return round(floor(raw_lot / volume_step) * volume_step, 8)
+│
+├─ ─────────────── LAYER 2: SAFETY NET (CIRCUIT BREAKER) ───────────────
+│
+├─ on_trade_closed(result: dict) → None
+│       Nhận kết quả mỗi lệnh đóng: {ticket, pnl, close_reason, timestamp}
+│       1. Append vào self.trade_history
+│       2. Gọi _update_streak(pnl)
+│       3. Gọi _check_daily_drawdown(current_balance)
+│       4. Gọi _check_balance_floor(current_balance)
+│       5. Log: [TRADE_CLOSE] ticket | pnl | streak | daily_dd | status
+│
+├─ _update_streak(pnl: float) → None
+│       if pnl < 0:
+│           consecutive_losses += 1
+│           if consecutive_losses >= streak_limit:    # mặc định = 3
+│               _trigger_cooldown(reason="STREAK_LIMIT_3")
+│       else:
+│           consecutive_losses = 0                    # Reset khi thắng
+│
+├─ _check_daily_drawdown(current_balance: float) → None
+│       daily_dd_pct = (daily_start_balance - current_balance) / daily_start_balance
+│       if daily_dd_pct >= daily_drawdown_limit:      # mặc định = 6%
+│           _trigger_pause(reason=f"DAILY_DD_{daily_dd_pct:.2%}")
+│
+├─ _check_balance_floor(current_balance: float) → None
+│       floor_value = initial_balance * balance_floor_pct  # mặc định = 50%
+│       if current_balance <= floor_value:
+│           _trigger_halt(reason=f"BALANCE_FLOOR_{floor_value}")
+│
+├─ _trigger_cooldown(reason: str) → None   [4 giờ cooldown]
+│       bot_status   = "COOLDOWN"
+│       cooldown_until = datetime.utcnow() + timedelta(hours=4)
+│       log CRITICAL: f"[CIRCUIT_BREAKER] COOLDOWN activated | reason={reason} | resume={cooldown_until}"
+│       # Bot không giao dịch cho đến cooldown_until
+│
+├─ _trigger_pause(reason: str) → None      [Dừng đến ngày hôm sau]
+│       bot_status   = "PAUSED"
+│       resume_time  = next_day_start_utc()   # 00:00 UTC ngày tiếp theo
+│       cooldown_until = resume_time
+│       log CRITICAL: f"[CIRCUIT_BREAKER] DAILY_PAUSE | reason={reason} | resume={resume_time}"
+│
+├─ _trigger_halt(reason: str) → None       [Hard stop — cần can thiệp thủ công]
+│       bot_status = "HALTED"
+│       log CRITICAL: f"[CIRCUIT_BREAKER] HARD_HALT | reason={reason} | MANUAL_INTERVENTION_REQUIRED"
+│       # Không tự phục hồi — admin phải reset thủ công qua config
+│
+├─ is_active() → bool
+│       if bot_status == "COOLDOWN" and datetime.utcnow() >= cooldown_until:
+│           bot_status = "ACTIVE"           # Auto-resume sau cooldown window
+│           consecutive_losses = 0         # Reset streak
+│           log INFO: "[CIRCUIT_BREAKER] Cooldown expired — bot ACTIVE"
+│       return bot_status == "ACTIVE"
+│
+├─ reset_daily(new_balance: float) → None  [Gọi mỗi đầu ngày UTC mới]
+│       daily_start_balance = new_balance
+│       if bot_status == "PAUSED":
+│           bot_status = "ACTIVE"          # Resume sau daily pause
+│           log INFO: "[CIRCUIT_BREAKER] Daily reset — bot ACTIVE"
+│       log INFO: f"[DAILY_RESET] daily_start_balance={new_balance}"
+│
+└─ get_status_report() → dict
+        return {
+            "bot_status":          bot_status,
+            "consecutive_losses":  consecutive_losses,
+            "daily_dd_pct":        daily_drawdown_pct (float),
+            "balance_floor_value": initial_balance * balance_floor_pct,
+            "cooldown_until":      cooldown_until (str|None),
+            "today_trades":        số lệnh hôm nay (int),
+        }
 ```
 
 ---
 
-## 2. PHÂN TÍCH MA SÁT THỊ TRƯỜNG THỰC TẾ (Exness Standard Cent)
+## 🏦 CÔNG THỨC TÍNH pip_value_per_lot — Exness Cent Account
 
-Đây là layer quan trọng nhất về giao dịch thực chiến. Hiểu rõ ma sát mới thiết kế đúng.
+Đây là phần **kỹ thuật đặc thù** của Exness Cent mà nhiều bot hay tính sai:
 
-### 2.1 Spread trên Exness Standard Cent
+### Exness Standard Cent — Quy đổi đơn vị
 
-| Cặp tiền | Spread bình thường (pips) | Spread giờ tin tức (pips) | Hệ số tăng |
-|----------|--------------------------|--------------------------|------------|
-| EURUSD   | 1.0–1.5                  | 10–50                    | 7–33×      |
-| GBPUSDc  | 1.2–2.0                  | 15–80                    | 8–40×      |
-
-→ **Rule:** Nếu spread hiện tại > `MAX_SPREAD_PIPS` (cấu hình, ví dụ 3.0 pips) → **ABORT**, không gửi lệnh.
-
-### 2.2 Requote và Rejection
-
-MT5 gửi lệnh sẽ nhận về một trong các mã lỗi:
-
-| MT5 Return Code | Ý nghĩa | Hành động |
-|-----------------|---------|-----------|
-| `TRADE_RETCODE_DONE` (10009) | Lệnh fill thành công | ✅ Done |
-| `TRADE_RETCODE_REQUOTE` (10004) | Giá thay đổi, cần requote | 🔄 Retry với giá mới |
-| `TRADE_RETCODE_REJECT` (10006) | Server từ chối | 🔄 Retry |
-| `TRADE_RETCODE_PRICE_CHANGED` (10018) | Giá đã thay — lệnh cũ lỗi thời | 🔄 Retry với giá mới |
-| `TRADE_RETCODE_TIMEOUT` (10010) | Hết thời gian chờ | 🚫 Abort, log TIMEOUT |
-| `TRADE_RETCODE_INVALID_PRICE` (10015) | Giá không hợp lệ | 🚫 Abort, log INVALID |
-
-→ **Rule Fill-or-Kill:** Retry tối đa `MAX_RETRY=3`. Mỗi retry → fetch `bid/ask` mới → tính lại `Entry/SL/TP`. Nếu sau 3 lần vẫn fail → `ABORT`, ghi log lý do đầy đủ.
-
-### 2.3 Commission Exness Standard Cent
-
-Exness Standard Cent thường **không tính commission** (built vào spread). Tuy nhiên module vẫn phải:
-- Đọc commission từ `mt5.order_calc_profit()` / `mt5.symbol_info()`
-- Tính vào P&L thực tế (để risk_manager.py tính đúng)
-- Ghi vào `trade_log.csv`
-
-### 2.4 Slippage Model
-
-Sau khi điền lệnh, giá thực tế có thể khác giá yêu cầu:
-- `slippage = actual_fill_price - requested_price` (tính bằng pips)
-- Ghi vào log để `ml_model.py` học pattern slippage theo session/volatility
-
----
-
-## 3. THIẾT KẾ CLASS `OrderManager` (OOP Architecture)
-
-### 3.1 Sơ đồ Class
-
-```
-class OrderManager
-│
-├─ __init__(config, data_pipeline, risk_manager, logger)
-│       Khởi tạo: symbol, max_spread, max_retry, slippage_log,
-│       timeout per order (default 10s), threading.Lock
-│
-├─ send_order(signal: TradeSignal) → OrderResult          [PUBLIC — Main Thread]
-│       Điểm vào chính. Flow:
-│         1. check_spread() → ABORT nếu quá rộng
-│         2. Vòng lặp Fill-or-Kill (tối đa max_retry=3):
-│            a. get_current_price() → bid/ask realtime
-│            b. calculate_order_params() → Entry/SL/TP mới
-│            c. validate_order_params() → sanity check SL/TP distance
-│            d. mt5.order_send() → gửi lệnh
-│            e. Xử lý retcode → Done / Retry / Abort
-│         3. Nếu DONE → log thành công, ghi trade_log.csv
-│         4. Nếu ABORT → log lý do, return OrderResult(failed=True)
-│
-├─ check_spread(symbol: str) → SpreadCheckResult          [PUBLIC]
-│       Fetch symbol_info().ask - symbol_info().bid → tính pips
-│       So sánh với config["max_spread_pips"]
-│       Return: SpreadCheckResult(ok=bool, spread_pips=float)
-│
-├─ calculate_order_params(signal, bid, ask) → OrderParams [PUBLIC]
-│       Tính lại Entry, SL, TP từ bid/ask realtime + ATR(14) + Signal
-│       SL formula: wick_tip + spread + (ATR_multiplier × ATR14)
-│       TP formula: Entry + Risk/Reward × SL_distance
-│       Return: OrderParams(entry, sl, tp, lot, comment)
-│
-├─ validate_order_params(params: OrderParams) → bool      [PUBLIC]
-│       Kiểm tra SL/TP không vi phạm broker limits:
-│         - SL_distance >= symbol_info().stops_level (pips)
-│         - TP_distance >= symbol_info().stops_level (pips)
-│         - lot >= symbol_info().volume_min
-│         - lot <= symbol_info().volume_max
-│       Return False → Abort lệnh ngay
-│
-├─ _execute_mt5_order(params: OrderParams) → mt5.OrderSendResult  [PRIVATE]
-│       Build mt5.TradeRequest dict từ OrderParams
-│       Gọi mt5.order_send()
-│       Return raw MT5 result object
-│
-├─ _handle_retcode(result, attempt: int) → RetcodeAction  [PRIVATE]
-│       Map TRADE_RETCODE_* → DONE / RETRY / ABORT
-│       Log chi tiết: retcode, comment, price, attempt số mấy
-│
-├─ _log_trade(result: OrderResult, params: OrderParams)   [PRIVATE]
-│       Ghi vào data/trade_log.csv:
-│         ticket, symbol, type, lot, entry, sl, tp,
-│         spread_at_entry, slippage_pips, commission,
-│         timestamp_utc, reject_reason
-│       Ghi vào logs/system.log (INFO level)
-│
-└─ get_open_positions() → List[PositionInfo]              [PUBLIC]
-        mt5.positions_get(symbol=self._symbol)
-        Return list PositionInfo (ticket, type, lot, profit, sl, tp)
-```
-
-### 3.2 Data Structures
+Exness Cent sử dụng **Cent USD (USC)** thay vì USD thật:
+- 1 Lot Cent = 1,000 Cent units (= 10 USD units tương đương về lot)
+- Giá trị 1 pip với 1 Lot Standard trên EURUSDc: **0.10 USD** (thay vì $10 trên tài khoản Standard thường)
 
 ```python
-@dataclass
-class TradeSignal:
-    direction: str           # "BUY" | "SELL"
-    entry_price: float       # Giá dự kiến vào lệnh
-    sl_price: float          # Stop Loss giá tuyệt đối
-    tp_price: float          # Take Profit giá tuyệt đối
-    lot: float               # Volume từ risk_manager
-    source_tf: str           # Timeframe kích hoạt signal ("M5")
-    signal_id: str           # UUID để trace log
-    atr14: float             # ATR(14) tại thời điểm signal
+# Tính pip value per lot cho Exness Standard Cent — EURUSDc
+# pip_size = 0.0001 (4 chữ số thập phân)
+# contract_size_cent = 100,000 Cent units / lot
 
-@dataclass
-class OrderParams:
-    direction: str
-    entry: float             # Recalculated từ bid/ask realtime
-    sl: float                # Recalculated
-    tp: float                # Recalculated
-    lot: float
-    comment: str             # "Rabit_v1.2_{signal_id}"
-    deviation: int           # Max slippage cho phép (points)
+# Cách ĐÚNG: Dùng mt5.symbol_info() để lấy giá trị thực tế
+def _get_pip_value_per_lot(symbol: str) -> float:
+    """
+    Trả về giá trị tiền tệ (USD) của 1 pip với 1 Lot chuẩn.
+    Tự động lấy từ MT5 API — tránh hardcode sai.
+    
+    Công thức:
+        pip_value_per_lot = pip_size * contract_size * tick_value / tick_size
+        Hoặc đơn giản hơn: dùng symbol_info().trade_tick_value đã được MT5 scale sẵn.
+    """
+    info = mt5.symbol_info(symbol)
+    if info is None:
+        raise ValueError(f"Cannot get symbol info for {symbol}")
+    
+    # trade_tick_value: giá trị tiền tệ của 1 tick với 1 lot (MT5 đã quy đổi về deposit currency)
+    # trade_tick_size: kích thước 1 tick (VD: 0.00001 cho EURUSDc 5 digits)
+    pip_size = info.point * 10            # 1 pip = 10 points (cho 5-digit broker)
+    pip_value_per_lot = (pip_size / info.trade_tick_size) * info.trade_tick_value
+    return pip_value_per_lot
 
-@dataclass
-class OrderResult:
-    success: bool
-    ticket: Optional[int]    # MT5 order ticket nếu filled
-    fill_price: float        # Giá thực tế sau fill
-    fill_time: datetime      # Thời gian fill (UTC)
-    slippage_pips: float     # fill_price - entry (pips)
-    reject_reason: str       # "SPREAD_TOO_HIGH" | "TIMEOUT" | "REQUOTE_MAX" | ""
-    attempts: int            # Số lần retry đã dùng
+# Ví dụ thực tế với EURUSDc trên Exness Cent:
+# trade_tick_size  = 0.00001
+# trade_tick_value = 0.01 (USD — vì Cent lot nhỏ hơn 100x)
+# pip_size         = 0.0001
+# pip_value_per_lot = (0.0001 / 0.00001) * 0.01 = 10 * 0.01 = 0.10 USD/pip/lot
+```
 
-@dataclass
-class SpreadCheckResult:
-    ok: bool
-    spread_pips: float
-    max_allowed: float
+### Công thức Position Sizing hoàn chỉnh
+
+```
+Ví dụ minh họa:
+  balance              = 200 USD (Cent account)
+  max_risk_per_trade   = 3%
+  risk_amount          = 200 * 0.03 = 6 USD
+  atr_value            = 0.00150 (15 pips)
+  atr_multiplier       = 1.5
+  sl_distance_pips     = 15 pips * 1.5 = 22.5 pips
+  pip_value_per_lot    = 0.10 USD/pip/lot   (Exness Cent EURUSDc)
+
+  raw_lot = risk_amount / (sl_distance_pips * pip_value_per_lot)
+          = 6 / (22.5 * 0.10)
+          = 6 / 2.25
+          = 2.67 lots (Cent lots)
+
+  Sau floor_lot (volume_step = 0.01):
+  final_lot = 2.67 → 2.67 lots Cent ✓
+  
+  Verify lại: 2.67 * 22.5 * 0.10 = 6.0075 USD ≈ 6 USD ✓ (≤ 3% balance)
 ```
 
 ---
 
-## 4. FILL-OR-KILL FLOW CHART
+## 🔀 FLOW NGẮT CẦU DAO — State Machine Diagram
 
 ```
-send_order(signal)
-│
-├─ [Step 1] check_spread()
-│     spread > max_spread_pips?
-│         YES → log "SPREAD_TOO_HIGH: {spread}pips > {max}pips"
-│               return OrderResult(success=False, reject_reason="SPREAD_TOO_HIGH")
-│         NO  → proceed
-│
-├─ [Step 2] Fill-or-Kill Loop (attempt 1..MAX_RETRY=3)
-│
-│   ┌─ attempt N ─────────────────────────────────────────┐
-│   │  get_current_price() → bid, ask (realtime)           │
-│   │  calculate_order_params(signal, bid, ask) → params   │
-│   │  validate_order_params(params) → bool                │
-│   │      INVALID → Abort (SL/TP vi phạm broker limit)   │
-│   │  _execute_mt5_order(params) → mt5_result             │
-│   │  _handle_retcode(mt5_result, attempt) → action       │
-│   │                                                       │
-│   │  action == DONE  → break → [Step 3]                  │
-│   │  action == RETRY → sleep(0.5s) → attempt N+1         │
-│   │  action == ABORT → break → [Step 4 FAIL]             │
-│   └───────────────────────────────────────────────────────┘
-│
-│   attempt > MAX_RETRY → break → [Step 4 FAIL với "REQUOTE_MAX"]
-│
-├─ [Step 3] SUCCESS
-│     _log_trade(result=OrderResult(success=True, ...))
-│     return OrderResult
-│
-└─ [Step 4] FAIL
-      _log_trade(result=OrderResult(success=False, reject_reason=...))
-      return OrderResult
+                    ┌──────────────────────────┐
+                    │         ACTIVE           │
+                    │  (Giao dịch bình thường) │
+                    └──────────┬───────────────┘
+                               │ on_trade_closed()
+                               ▼
+              ┌────────────────────────────────────┐
+              │         KIỂM TRA 3 NGƯỠNG          │
+              │   (mỗi khi có lệnh đóng)           │
+              └──┬─────────────┬──────────────┬────┘
+                 │             │              │
+    [consecutive │   [daily_dd │  [balance ≤  │
+     losses ≥ 3] │   ≥ 6%]    │   50% init]  │
+                 ▼             ▼              ▼
+          ┌──────────┐  ┌──────────┐  ┌──────────┐
+          │ COOLDOWN │  │  PAUSED  │  │  HALTED  │
+          │ (4 giờ)  │  │ (đến sáng│  │(vĩnh viễn│
+          │          │  │ UTC tiếp)│  │cho đến   │
+          │          │  │          │  │admin fix)│
+          └────┬─────┘  └────┬─────┘  └──────────┘
+               │             │
+    [4h trôi   │  [00:00 UTC │
+     qua]      │  ngày tiếp] │
+               ▼             ▼
+          ┌──────────────────────────┐
+          │         ACTIVE           │
+          │      (Auto-resume)       │
+          └──────────────────────────┘
+
+HALTED: Không tự động resume.
+        Admin phải chạy: risk_manager.manual_reset(confirmed=True)
 ```
 
 ---
 
-## 5. SL/TP RECALCULATION LOGIC (Mỗi Retry)
+## 📐 CẤU TRÚC FILE & CONFIG
 
-**Tại sao phải tính lại?**
-- Lần retry đầu dùng giá `T=0`. Giả sử bị Requote, giá đã di chuyển 2 pips.
-- Nếu gửi lại với Entry/SL/TP cũ → SL distance có thể không còn hợp lệ theo price mới.
-- Phải tính lại từ `bid/ask` mới → SL distance = `ATR_multiplier × ATR14 + spread` → TP = Entry ± `risk_reward_ratio × SL_distance`.
+### `risk_manager.py` — Cấu trúc đề xuất
 
 ```python
-def calculate_order_params(self, signal: TradeSignal, bid: float, ask: float) -> OrderParams:
-    spread_price = ask - bid  # in price terms
-    pip_size = self._symbol_pip_size  # e.g., 0.00001 for EURUSD
+# risk_manager.py
+# Khoảng ~300 dòng (production-ready, type hints)
 
-    if signal.direction == "BUY":
-        entry = ask                                       # BUY vào ASK
-        sl = entry - (signal.atr14 * self._atr_multiplier) - spread_price
-        tp = entry + (signal.atr14 * self._rr_ratio * self._atr_multiplier)
-    else:  # SELL
-        entry = bid                                       # SELL vào BID
-        sl = entry + (signal.atr14 * self._atr_multiplier) + spread_price
-        tp = entry - (signal.atr14 * self._rr_ratio * self._atr_multiplier)
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from math import floor
+from typing import Optional
+import logging
+import MetaTrader5 as mt5
 
-    return OrderParams(
-        direction=signal.direction, entry=entry, sl=sl, tp=tp,
-        lot=signal.lot,
-        comment=f"Rabit_v1_{signal.signal_id[:8]}",
-        deviation=10  # 10 points max slippage
-    )
+@dataclass
+class TradeResult:
+    ticket:       int
+    pnl:          float
+    close_reason: str
+    timestamp:    datetime
+
+class RiskManager:
+    # Constants — có thể override qua config dict
+    DEFAULT_DAILY_DD_LIMIT       = 0.06   # 6%
+    DEFAULT_STREAK_LIMIT         = 3
+    DEFAULT_BALANCE_FLOOR_PCT    = 0.50   # 50% initial
+    DEFAULT_MAX_RISK_PER_TRADE   = 0.03   # 3%
+    DEFAULT_ATR_MULTIPLIER       = 1.5
+    
+    def __init__(self, config: dict, initial_balance: float, logger: logging.Logger): ...
+    def calculate_lot_size(self, balance, atr_value, sl_pips) -> float: ...
+    def calculate_sl_distance(self, atr_value, direction) -> float: ...
+    def validate_trade(self, balance, lot_size, sl_pips) -> tuple[bool, str]: ...
+    def on_trade_closed(self, result: TradeResult) -> None: ...
+    def is_active(self) -> bool: ...
+    def reset_daily(self, new_balance: float) -> None: ...
+    def get_status_report(self) -> dict: ...
+    def manual_reset(self, confirmed: bool) -> bool: ...   # Chỉ dùng cho HALTED state
+    
+    # Private helpers
+    def _floor_lot(self, raw_lot, volume_step) -> float: ...
+    def _get_pip_value_per_lot(self, symbol) -> float: ...
+    def _update_streak(self, pnl) -> None: ...
+    def _check_daily_drawdown(self, current_balance) -> None: ...
+    def _check_balance_floor(self, current_balance) -> None: ...
+    def _trigger_cooldown(self, reason) -> None: ...
+    def _trigger_pause(self, reason) -> None: ...
+    def _trigger_halt(self, reason) -> None: ...
 ```
 
----
-
-## 6. LOGGING CHUẨN
-
-Format: `[TIME] - [LEVEL] - [OrderManager] - [MESSAGE]`
-
-```
-[2026-03-05 14:30:00 UTC] - [INFO]    - [OrderManager] - SPREAD CHECK OK: EURUSDc spread=1.3pips (max=3.0pips)
-[2026-03-05 14:30:00 UTC] - [INFO]    - [OrderManager] - Sending BUY order: entry=1.08512, SL=1.08432, TP=1.08672, lot=0.01 | attempt=1/3
-[2026-03-05 14:30:01 UTC] - [WARNING] - [OrderManager] - REQUOTE on attempt 1: retcode=10004. Recalculating from new bid/ask...
-[2026-03-05 14:30:01 UTC] - [INFO]    - [OrderManager] - Retry attempt 2: new entry=1.08514, SL=1.08434, TP=1.08674
-[2026-03-05 14:30:02 UTC] - [INFO]    - [OrderManager] - ORDER FILLED: ticket=123456789, fill_price=1.08514, slippage=+0.2pips
-[2026-03-05 14:30:02 UTC] - [INFO]    - [OrderManager] - Trade logged to data/trade_log.csv | signal_id=abc12345
-
-# Failure case:
-[2026-03-05 16:45:00 UTC] - [WARNING] - [OrderManager] - SPREAD_TOO_HIGH: spread=8.7pips > max=3.0pips. Order ABORTED. [signal_id=def67890]
-[2026-03-05 16:45:00 UTC] - [ERROR]   - [OrderManager] - REQUOTE_MAX: failed after 3 attempts. Order ABORTED. [signal_id=xyz11111]
-```
-
----
-
-## 7. TRADE LOG FORMAT (`data/trade_log.csv`)
-
-```csv
-timestamp_utc,ticket,signal_id,symbol,direction,lot,entry,sl,tp,
-fill_price,slippage_pips,spread_at_entry,commission,reject_reason,
-attempts,source_tf,signal_score
-2026-03-05T14:30:02Z,123456789,abc12345,EURUSDc,BUY,0.01,1.08512,
-1.08432,1.08672,1.08514,+0.2,1.3,0.0,,2,M5,78.5
-```
-
----
-
-## 8. THREAD SAFETY VÀ TÍCH HỢP VỚI HỆ THỐNG
-
-### Vị trí trong State Machine (main.py):
-```
-[SIGNAL_FOUND]
-    ↓ validate risk_manager.check_risk(signal)
-[PENDING_ORDER]
-    ↓ order_manager.send_order(signal) ← Task 1.2 này
-    ↓ Timeout: 10s (nếu không fill sau 10s → ABORT)
-[IN_TRADE] nếu success
-[IDLE] nếu fail
-```
-
-### Thread Safety:
-- `send_order()` chạy trên **Main Thread** (không cần threading — đây là blocking call theo State Machine, chỉ 1 lệnh tại 1 thời điểm).
-- `threading.Lock` bảo vệ `_pending_ticket` flag để tránh double-send nếu heartbeat thread vô tình gọi.
-- Tất cả file write (`trade_log.csv`) dùng `threading.Lock` vì ML module sẽ đọc file này concurrent sau này.
-
----
-
-## 9. CẤU HÌNH `execution_config.json` (Đề xuất)
+### `config/risk_config.json`
 
 ```json
 {
   "symbol": "EURUSDc",
-  "max_spread_pips": 3.0,
-  "max_retry": 3,
-  "retry_delay_sec": 0.5,
-  "order_timeout_sec": 10,
-  "atr_multiplier_sl": 1.5,
-  "risk_reward_ratio": 2.0,
-  "max_deviation_points": 10,
-  "trade_log_path": "data/trade_log.csv"
+  "initial_balance": 200.0,
+  "risk_per_trade_pct": 0.03,
+  "atr_multiplier": 1.5,
+  "safety_net": {
+    "daily_drawdown_limit_pct": 0.06,
+    "consecutive_loss_streak": 3,
+    "cooldown_hours": 4,
+    "min_balance_floor_pct": 0.50
+  },
+  "volume": {
+    "min_lot": 0.01,
+    "max_lot": 100.0,
+    "volume_step": 0.01
+  }
 }
 ```
 
 ---
 
-## 10. ĐỀ XUẤT CẢI TIẾN (Optional Next Iterations)
+## 📋 BẢNG TỔNG KẾT HÀM & TRÁCH NHIỆM
 
-| # | Ý tưởng | Lý do | Ưu tiên |
-|---|---------|-------|---------|
-| E1 | `PartialFill` detection | MT5 có thể fill một phần lot | MEDIUM |
-| E2 | `OCO` (One Cancels Other) | Gắn TP/SL trực tiếp lên server side | HIGH |
-| E3 | Dynamic deviation scaling | Tăng `deviation` theo volatility | MEDIUM |
-| E4 | Pre-trade slippage estimate | Dự đoán slippage trước khi send | LOW |
-| E5 | Commission lookup cache | Tránh gọi `symbol_info()` mỗi lần | LOW |
+| Hàm | Layer | Trách nhiệm | Notes |
+|-----|-------|-------------|-------|
+| `calculate_lot_size()` | Position Sizing | Tính lot từ balance + ATR SL | Public API |
+| `calculate_sl_distance()` | Position Sizing | ATR * multiplier = SL pips | Public API |
+| `validate_trade()` | Validation | Kiểm tra lot hợp lệ + bot active | Public API |
+| `on_trade_closed()` | Safety Net | Điểm vào duy nhất sau đóng lệnh | Public API |
+| `is_active()` | Safety Net | Check + auto-resume cooldown | Public API |
+| `reset_daily()` | Safety Net | Reset balance chuẩn + resume PAUSED | Main gọi 00:00 UTC |
+| `get_status_report()` | Monitoring | Trả dict cho dashboard/log | Public API |
+| `manual_reset()` | Recovery | Unlock HALTED state | Admin only |
+| `_floor_lot()` | Utility | round(..., 8) tránh INVALID_VOLUME | ← FIX 3 từ Task 1.2 |
+| `_get_pip_value_per_lot()` | Utility | Dùng MT5 API, không hardcode | Exness Cent formula |
+| `_update_streak()` | Circuit Breaker | Đếm thua liên tiếp → COOLDOWN | Auto |
+| `_check_daily_drawdown()` | Circuit Breaker | DD ≥ 6% → PAUSED | Auto |
+| `_check_balance_floor()` | Circuit Breaker | Balance ≤ 50% init → HALTED | Auto |
+| `_trigger_cooldown()` | Circuit Breaker | 4h pause, log CRITICAL | Auto |
+| `_trigger_pause()` | Circuit Breaker | Until 00:00 UTC next day | Auto |
+| `_trigger_halt()` | Circuit Breaker | Permanent stop, manual needed | Auto |
 
 ---
 
-## 11. TIÊU CHÍ NGHIỆM THU (Acceptance Criteria — Task 1.2)
+## 📡 LOGGING SCHEMA
 
-| # | Tiêu chí | Cách kiểm tra |
-|---|---------|---------------|
-| AC-1 | Spread > max → lệnh không được gửi, log `SPREAD_TOO_HIGH` | Mock spread cao, check OrderResult.reject_reason |
-| AC-2 | Requote → retry tối đa 3 lần với giá mới | Mock retcode REQUOTE lần 1+2, DONE lần 3 |
-| AC-3 | Fail hết 3 lần → log `REQUOTE_MAX`, abort | Mock REQUOTE 3 lần → check result.success=False |
-| AC-4 | Fill price được ghi vào trade_log.csv | Đọc lại CSV sau fill, kiểm tra row |
-| AC-5 | SL/TP luôn hợp lệ sau recalculation | Assert SL distance ≥ stops_level |
+```
+[2026-03-05 15:30:00 UTC] - [INFO]     - [RiskManager] - Lot size calculated | balance=200.0 | atr=0.00150 | sl_pips=22.5 | pip_val=0.10 | raw_lot=2.67 | final_lot=2.67
+[2026-03-05 15:35:00 UTC] - [INFO]     - [RiskManager] - Trade validated OK | lot=2.67 | risk=6.0 USD | risk_pct=3.00%
+[2026-03-05 16:00:00 UTC] - [WARNING]  - [RiskManager] - [TRADE_CLOSE] ticket=12345 | pnl=-5.20 | streak=1 | daily_dd=2.60%
+[2026-03-05 16:30:00 UTC] - [WARNING]  - [RiskManager] - [TRADE_CLOSE] ticket=12346 | pnl=-4.80 | streak=2 | daily_dd=5.00%
+[2026-03-05 17:00:00 UTC] - [WARNING]  - [RiskManager] - [TRADE_CLOSE] ticket=12347 | pnl=-3.10 | streak=3 | daily_dd=6.55%
+[2026-03-05 17:00:00 UTC] - [CRITICAL] - [RiskManager] - [CIRCUIT_BREAKER] DAILY_PAUSE | reason=DAILY_DD_6.55% | resume=2026-03-06 00:00:00 UTC
+[2026-03-05 17:00:00 UTC] - [CRITICAL] - [RiskManager] - [CIRCUIT_BREAKER] COOLDOWN activated | reason=STREAK_LIMIT_3 | resume=2026-03-05 21:00:00 UTC
+[2026-03-06 00:00:01 UTC] - [INFO]     - [RiskManager] - [DAILY_RESET] daily_start_balance=187.90 | status: PAUSED → ACTIVE
+```
 
 ---
 
-**Trạng thái:** ✅ Thiết kế hoàn chỉnh — **CHỜ LỆNH "PROCEED" từ TechLead để bắt đầu code `execution.py`**
+## ⚡ ĐIỂM QUAN TRỌNG — Tích hợp với `execution.py`
 
-*Antigravity — 2026-03-05 22:00 UTC+7 | Branch: task-1.2-execution*
+`RiskManager` sẽ được gọi từ `main.py` State Machine theo flow:
+
+```
+[SIGNAL_FOUND] state:
+    1. risk_mgr.is_active()                           ← Check bot status
+    2. sl_pips = risk_mgr.calculate_sl_distance(atr)  ← Tính SL distance
+    3. lot    = risk_mgr.calculate_lot_size(bal, atr, sl_pips)  ← Tính lot
+    4. ok, reason = risk_mgr.validate_trade(bal, lot, sl_pips)  ← Validate
+    5. if ok: → chuyển state [PENDING_ORDER] → execution.py.send_order(lot, sl_pips)
+       else:  → log REJECT reason → về [IDLE]
+
+[CLOSING] state (sau khi lệnh đóng):
+    6. risk_mgr.on_trade_closed(TradeResult(...))     ← Safety Net check
+    7. if not risk_mgr.is_active(): log + về [IDLE] (không scan signal mới)
+```
+
+---
+
+## 🚦 NGƯỠNG CẦU DAO — Tóm tắt 3 Lớp
+
+| Ngưỡng | Giá trị | Hành động | Recovery |
+|--------|---------|-----------|----------|
+| `consecutive_loss_streak` | 3 lệnh thua liên tiếp | COOLDOWN 4 giờ | Auto-resume sau 4h |
+| `daily_drawdown_limit` | 6% balance trong ngày | PAUSED đến 00:00 UTC hôm sau | Auto-resume ngày mới |
+| `min_balance_floor` | Balance ≤ 50% vốn ban đầu | HALTED — vĩnh viễn | Manual admin reset |
+
+---
+
+## ❓ CÂU HỎI CẦN TECHLED CLARIFY TRƯỚC KHI CODE
+
+1. **ATR Multiplier mặc định:** Plan ghi "ATR(14) * Hệ số" — TechLead muốn hệ số mặc định là **1.5** hay khác?
+2. **initial_balance:** Nên đọc từ `risk_config.json` hay fetch từ `mt5.account_info().balance` lúc bot khởi động?
+3. **HALTED recovery:** `manual_reset()` chỉ reset qua code, hay cần một config flag để admin set từ file mà không cần restart bot?
+4. **Nhiều lệnh đồng thời (tương lai):** Khi nới `max_open_trades > 1`, công thức sizing có cần điều chỉnh `risk_per_trade / max_open_trades` không?
+
+---
+
+*Thiết kế bởi Antigravity — 2026-03-05 22:27 UTC+7 | Branch: task-1.3-risk-manager | PENDING TechLead APPROVAL*
