@@ -1,0 +1,343 @@
+# 📐 RESOLVED — Task 1.2: Thiết kế kiến trúc `execution.py`
+
+> **[LUẬT SOP]** File này là bản nháp phân tích chi tiết cho task **HIỆN TẠI**.
+> Sẽ bị **XÓA TRẮNG và ghi đè** khi sang Task 1.3.
+> Tóm tắt ngắn đọc tại `docs/walkthrough.md`.
+
+**Date:** 2026-03-05 22:00 UTC+7
+**Branch:** `task-1.2-execution`
+**Plan ref:** `Plan.md v1.1 — Giai đoạn 1: execution.py — Order Execution Layer`
+**Author:** Antigravity (Senior AI Coder)
+
+---
+
+## 1. PHÂN TÍCH YÊU CẦU TỪ PLAN.MD v1.1
+
+Trích từ `Plan.md`, Section `execution.py — Order Execution Layer`:
+
+```
+- [REVISED v1.1] Kiểm tra spread realtime trước khi gửi lệnh:
+    nếu spread > MAX_SPREAD_PIPS → abort
+- [REVISED v1.1] Implement Fill-or-Kill:
+    retry tối đa MAX_RETRY=3, mỗi retry tính lại Entry/SL/TP từ giá mới
+- Tính Commission và Dynamic Spread vào Entry/SL/TP
+- Ghi log lý do từ chối lệnh: REQUOTE / TIMEOUT / SPREAD_TOO_HIGH
+```
+
+---
+
+## 2. PHÂN TÍCH MA SÁT THỊ TRƯỜNG THỰC TẾ (Exness Standard Cent)
+
+Đây là layer quan trọng nhất về giao dịch thực chiến. Hiểu rõ ma sát mới thiết kế đúng.
+
+### 2.1 Spread trên Exness Standard Cent
+
+| Cặp tiền | Spread bình thường (pips) | Spread giờ tin tức (pips) | Hệ số tăng |
+|----------|--------------------------|--------------------------|------------|
+| EURUSD   | 1.0–1.5                  | 10–50                    | 7–33×      |
+| GBPUSDc  | 1.2–2.0                  | 15–80                    | 8–40×      |
+
+→ **Rule:** Nếu spread hiện tại > `MAX_SPREAD_PIPS` (cấu hình, ví dụ 3.0 pips) → **ABORT**, không gửi lệnh.
+
+### 2.2 Requote và Rejection
+
+MT5 gửi lệnh sẽ nhận về một trong các mã lỗi:
+
+| MT5 Return Code | Ý nghĩa | Hành động |
+|-----------------|---------|-----------|
+| `TRADE_RETCODE_DONE` (10009) | Lệnh fill thành công | ✅ Done |
+| `TRADE_RETCODE_REQUOTE` (10004) | Giá thay đổi, cần requote | 🔄 Retry với giá mới |
+| `TRADE_RETCODE_REJECT` (10006) | Server từ chối | 🔄 Retry |
+| `TRADE_RETCODE_PRICE_CHANGED` (10018) | Giá đã thay — lệnh cũ lỗi thời | 🔄 Retry với giá mới |
+| `TRADE_RETCODE_TIMEOUT` (10010) | Hết thời gian chờ | 🚫 Abort, log TIMEOUT |
+| `TRADE_RETCODE_INVALID_PRICE` (10015) | Giá không hợp lệ | 🚫 Abort, log INVALID |
+
+→ **Rule Fill-or-Kill:** Retry tối đa `MAX_RETRY=3`. Mỗi retry → fetch `bid/ask` mới → tính lại `Entry/SL/TP`. Nếu sau 3 lần vẫn fail → `ABORT`, ghi log lý do đầy đủ.
+
+### 2.3 Commission Exness Standard Cent
+
+Exness Standard Cent thường **không tính commission** (built vào spread). Tuy nhiên module vẫn phải:
+- Đọc commission từ `mt5.order_calc_profit()` / `mt5.symbol_info()`
+- Tính vào P&L thực tế (để risk_manager.py tính đúng)
+- Ghi vào `trade_log.csv`
+
+### 2.4 Slippage Model
+
+Sau khi điền lệnh, giá thực tế có thể khác giá yêu cầu:
+- `slippage = actual_fill_price - requested_price` (tính bằng pips)
+- Ghi vào log để `ml_model.py` học pattern slippage theo session/volatility
+
+---
+
+## 3. THIẾT KẾ CLASS `OrderManager` (OOP Architecture)
+
+### 3.1 Sơ đồ Class
+
+```
+class OrderManager
+│
+├─ __init__(config, data_pipeline, risk_manager, logger)
+│       Khởi tạo: symbol, max_spread, max_retry, slippage_log,
+│       timeout per order (default 10s), threading.Lock
+│
+├─ send_order(signal: TradeSignal) → OrderResult          [PUBLIC — Main Thread]
+│       Điểm vào chính. Flow:
+│         1. check_spread() → ABORT nếu quá rộng
+│         2. Vòng lặp Fill-or-Kill (tối đa max_retry=3):
+│            a. get_current_price() → bid/ask realtime
+│            b. calculate_order_params() → Entry/SL/TP mới
+│            c. validate_order_params() → sanity check SL/TP distance
+│            d. mt5.order_send() → gửi lệnh
+│            e. Xử lý retcode → Done / Retry / Abort
+│         3. Nếu DONE → log thành công, ghi trade_log.csv
+│         4. Nếu ABORT → log lý do, return OrderResult(failed=True)
+│
+├─ check_spread(symbol: str) → SpreadCheckResult          [PUBLIC]
+│       Fetch symbol_info().ask - symbol_info().bid → tính pips
+│       So sánh với config["max_spread_pips"]
+│       Return: SpreadCheckResult(ok=bool, spread_pips=float)
+│
+├─ calculate_order_params(signal, bid, ask) → OrderParams [PUBLIC]
+│       Tính lại Entry, SL, TP từ bid/ask realtime + ATR(14) + Signal
+│       SL formula: wick_tip + spread + (ATR_multiplier × ATR14)
+│       TP formula: Entry + Risk/Reward × SL_distance
+│       Return: OrderParams(entry, sl, tp, lot, comment)
+│
+├─ validate_order_params(params: OrderParams) → bool      [PUBLIC]
+│       Kiểm tra SL/TP không vi phạm broker limits:
+│         - SL_distance >= symbol_info().stops_level (pips)
+│         - TP_distance >= symbol_info().stops_level (pips)
+│         - lot >= symbol_info().volume_min
+│         - lot <= symbol_info().volume_max
+│       Return False → Abort lệnh ngay
+│
+├─ _execute_mt5_order(params: OrderParams) → mt5.OrderSendResult  [PRIVATE]
+│       Build mt5.TradeRequest dict từ OrderParams
+│       Gọi mt5.order_send()
+│       Return raw MT5 result object
+│
+├─ _handle_retcode(result, attempt: int) → RetcodeAction  [PRIVATE]
+│       Map TRADE_RETCODE_* → DONE / RETRY / ABORT
+│       Log chi tiết: retcode, comment, price, attempt số mấy
+│
+├─ _log_trade(result: OrderResult, params: OrderParams)   [PRIVATE]
+│       Ghi vào data/trade_log.csv:
+│         ticket, symbol, type, lot, entry, sl, tp,
+│         spread_at_entry, slippage_pips, commission,
+│         timestamp_utc, reject_reason
+│       Ghi vào logs/system.log (INFO level)
+│
+└─ get_open_positions() → List[PositionInfo]              [PUBLIC]
+        mt5.positions_get(symbol=self._symbol)
+        Return list PositionInfo (ticket, type, lot, profit, sl, tp)
+```
+
+### 3.2 Data Structures
+
+```python
+@dataclass
+class TradeSignal:
+    direction: str           # "BUY" | "SELL"
+    entry_price: float       # Giá dự kiến vào lệnh
+    sl_price: float          # Stop Loss giá tuyệt đối
+    tp_price: float          # Take Profit giá tuyệt đối
+    lot: float               # Volume từ risk_manager
+    source_tf: str           # Timeframe kích hoạt signal ("M5")
+    signal_id: str           # UUID để trace log
+    atr14: float             # ATR(14) tại thời điểm signal
+
+@dataclass
+class OrderParams:
+    direction: str
+    entry: float             # Recalculated từ bid/ask realtime
+    sl: float                # Recalculated
+    tp: float                # Recalculated
+    lot: float
+    comment: str             # "Rabit_v1.2_{signal_id}"
+    deviation: int           # Max slippage cho phép (points)
+
+@dataclass
+class OrderResult:
+    success: bool
+    ticket: Optional[int]    # MT5 order ticket nếu filled
+    fill_price: float        # Giá thực tế sau fill
+    fill_time: datetime      # Thời gian fill (UTC)
+    slippage_pips: float     # fill_price - entry (pips)
+    reject_reason: str       # "SPREAD_TOO_HIGH" | "TIMEOUT" | "REQUOTE_MAX" | ""
+    attempts: int            # Số lần retry đã dùng
+
+@dataclass
+class SpreadCheckResult:
+    ok: bool
+    spread_pips: float
+    max_allowed: float
+```
+
+---
+
+## 4. FILL-OR-KILL FLOW CHART
+
+```
+send_order(signal)
+│
+├─ [Step 1] check_spread()
+│     spread > max_spread_pips?
+│         YES → log "SPREAD_TOO_HIGH: {spread}pips > {max}pips"
+│               return OrderResult(success=False, reject_reason="SPREAD_TOO_HIGH")
+│         NO  → proceed
+│
+├─ [Step 2] Fill-or-Kill Loop (attempt 1..MAX_RETRY=3)
+│
+│   ┌─ attempt N ─────────────────────────────────────────┐
+│   │  get_current_price() → bid, ask (realtime)           │
+│   │  calculate_order_params(signal, bid, ask) → params   │
+│   │  validate_order_params(params) → bool                │
+│   │      INVALID → Abort (SL/TP vi phạm broker limit)   │
+│   │  _execute_mt5_order(params) → mt5_result             │
+│   │  _handle_retcode(mt5_result, attempt) → action       │
+│   │                                                       │
+│   │  action == DONE  → break → [Step 3]                  │
+│   │  action == RETRY → sleep(0.5s) → attempt N+1         │
+│   │  action == ABORT → break → [Step 4 FAIL]             │
+│   └───────────────────────────────────────────────────────┘
+│
+│   attempt > MAX_RETRY → break → [Step 4 FAIL với "REQUOTE_MAX"]
+│
+├─ [Step 3] SUCCESS
+│     _log_trade(result=OrderResult(success=True, ...))
+│     return OrderResult
+│
+└─ [Step 4] FAIL
+      _log_trade(result=OrderResult(success=False, reject_reason=...))
+      return OrderResult
+```
+
+---
+
+## 5. SL/TP RECALCULATION LOGIC (Mỗi Retry)
+
+**Tại sao phải tính lại?**
+- Lần retry đầu dùng giá `T=0`. Giả sử bị Requote, giá đã di chuyển 2 pips.
+- Nếu gửi lại với Entry/SL/TP cũ → SL distance có thể không còn hợp lệ theo price mới.
+- Phải tính lại từ `bid/ask` mới → SL distance = `ATR_multiplier × ATR14 + spread` → TP = Entry ± `risk_reward_ratio × SL_distance`.
+
+```python
+def calculate_order_params(self, signal: TradeSignal, bid: float, ask: float) -> OrderParams:
+    spread_price = ask - bid  # in price terms
+    pip_size = self._symbol_pip_size  # e.g., 0.00001 for EURUSD
+
+    if signal.direction == "BUY":
+        entry = ask                                       # BUY vào ASK
+        sl = entry - (signal.atr14 * self._atr_multiplier) - spread_price
+        tp = entry + (signal.atr14 * self._rr_ratio * self._atr_multiplier)
+    else:  # SELL
+        entry = bid                                       # SELL vào BID
+        sl = entry + (signal.atr14 * self._atr_multiplier) + spread_price
+        tp = entry - (signal.atr14 * self._rr_ratio * self._atr_multiplier)
+
+    return OrderParams(
+        direction=signal.direction, entry=entry, sl=sl, tp=tp,
+        lot=signal.lot,
+        comment=f"Rabit_v1_{signal.signal_id[:8]}",
+        deviation=10  # 10 points max slippage
+    )
+```
+
+---
+
+## 6. LOGGING CHUẨN
+
+Format: `[TIME] - [LEVEL] - [OrderManager] - [MESSAGE]`
+
+```
+[2026-03-05 14:30:00 UTC] - [INFO]    - [OrderManager] - SPREAD CHECK OK: EURUSDc spread=1.3pips (max=3.0pips)
+[2026-03-05 14:30:00 UTC] - [INFO]    - [OrderManager] - Sending BUY order: entry=1.08512, SL=1.08432, TP=1.08672, lot=0.01 | attempt=1/3
+[2026-03-05 14:30:01 UTC] - [WARNING] - [OrderManager] - REQUOTE on attempt 1: retcode=10004. Recalculating from new bid/ask...
+[2026-03-05 14:30:01 UTC] - [INFO]    - [OrderManager] - Retry attempt 2: new entry=1.08514, SL=1.08434, TP=1.08674
+[2026-03-05 14:30:02 UTC] - [INFO]    - [OrderManager] - ORDER FILLED: ticket=123456789, fill_price=1.08514, slippage=+0.2pips
+[2026-03-05 14:30:02 UTC] - [INFO]    - [OrderManager] - Trade logged to data/trade_log.csv | signal_id=abc12345
+
+# Failure case:
+[2026-03-05 16:45:00 UTC] - [WARNING] - [OrderManager] - SPREAD_TOO_HIGH: spread=8.7pips > max=3.0pips. Order ABORTED. [signal_id=def67890]
+[2026-03-05 16:45:00 UTC] - [ERROR]   - [OrderManager] - REQUOTE_MAX: failed after 3 attempts. Order ABORTED. [signal_id=xyz11111]
+```
+
+---
+
+## 7. TRADE LOG FORMAT (`data/trade_log.csv`)
+
+```csv
+timestamp_utc,ticket,signal_id,symbol,direction,lot,entry,sl,tp,
+fill_price,slippage_pips,spread_at_entry,commission,reject_reason,
+attempts,source_tf,signal_score
+2026-03-05T14:30:02Z,123456789,abc12345,EURUSDc,BUY,0.01,1.08512,
+1.08432,1.08672,1.08514,+0.2,1.3,0.0,,2,M5,78.5
+```
+
+---
+
+## 8. THREAD SAFETY VÀ TÍCH HỢP VỚI HỆ THỐNG
+
+### Vị trí trong State Machine (main.py):
+```
+[SIGNAL_FOUND]
+    ↓ validate risk_manager.check_risk(signal)
+[PENDING_ORDER]
+    ↓ order_manager.send_order(signal) ← Task 1.2 này
+    ↓ Timeout: 10s (nếu không fill sau 10s → ABORT)
+[IN_TRADE] nếu success
+[IDLE] nếu fail
+```
+
+### Thread Safety:
+- `send_order()` chạy trên **Main Thread** (không cần threading — đây là blocking call theo State Machine, chỉ 1 lệnh tại 1 thời điểm).
+- `threading.Lock` bảo vệ `_pending_ticket` flag để tránh double-send nếu heartbeat thread vô tình gọi.
+- Tất cả file write (`trade_log.csv`) dùng `threading.Lock` vì ML module sẽ đọc file này concurrent sau này.
+
+---
+
+## 9. CẤU HÌNH `execution_config.json` (Đề xuất)
+
+```json
+{
+  "symbol": "EURUSDc",
+  "max_spread_pips": 3.0,
+  "max_retry": 3,
+  "retry_delay_sec": 0.5,
+  "order_timeout_sec": 10,
+  "atr_multiplier_sl": 1.5,
+  "risk_reward_ratio": 2.0,
+  "max_deviation_points": 10,
+  "trade_log_path": "data/trade_log.csv"
+}
+```
+
+---
+
+## 10. ĐỀ XUẤT CẢI TIẾN (Optional Next Iterations)
+
+| # | Ý tưởng | Lý do | Ưu tiên |
+|---|---------|-------|---------|
+| E1 | `PartialFill` detection | MT5 có thể fill một phần lot | MEDIUM |
+| E2 | `OCO` (One Cancels Other) | Gắn TP/SL trực tiếp lên server side | HIGH |
+| E3 | Dynamic deviation scaling | Tăng `deviation` theo volatility | MEDIUM |
+| E4 | Pre-trade slippage estimate | Dự đoán slippage trước khi send | LOW |
+| E5 | Commission lookup cache | Tránh gọi `symbol_info()` mỗi lần | LOW |
+
+---
+
+## 11. TIÊU CHÍ NGHIỆM THU (Acceptance Criteria — Task 1.2)
+
+| # | Tiêu chí | Cách kiểm tra |
+|---|---------|---------------|
+| AC-1 | Spread > max → lệnh không được gửi, log `SPREAD_TOO_HIGH` | Mock spread cao, check OrderResult.reject_reason |
+| AC-2 | Requote → retry tối đa 3 lần với giá mới | Mock retcode REQUOTE lần 1+2, DONE lần 3 |
+| AC-3 | Fail hết 3 lần → log `REQUOTE_MAX`, abort | Mock REQUOTE 3 lần → check result.success=False |
+| AC-4 | Fill price được ghi vào trade_log.csv | Đọc lại CSV sau fill, kiểm tra row |
+| AC-5 | SL/TP luôn hợp lệ sau recalculation | Assert SL distance ≥ stops_level |
+
+---
+
+**Trạng thái:** ✅ Thiết kế hoàn chỉnh — **CHỜ LỆNH "PROCEED" từ TechLead để bắt đầu code `execution.py`**
+
+*Antigravity — 2026-03-05 22:00 UTC+7 | Branch: task-1.2-execution*

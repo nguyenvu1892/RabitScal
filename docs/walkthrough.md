@@ -625,3 +625,29 @@ RabitScal/
 ---
 
 *Cập nhật bởi Antigravity — 2026-03-05 22:00 UTC+7 | Branch: task-1.1-data-pipeline*
+
+---
+
+> **📌 SOP UPDATE (TechLead — 2026-03-05 22:00):** Từ đây, `walkthrough.md` CHỈ ghi tóm tắt ngắn (≤7 bullets/task, append-only). Phân tích chi tiết viết vào `docs/walkthrough.md.resolved` (overwrite mỗi task mới).
+
+---
+
+## ✅ Task 1.1 HOÀN TẤT — `data_pipeline.py` (TechLead APPROVED)
+
+**Date:** 2026-03-05 22:00 UTC+7 | **Branch:** `task-1.1-data-pipeline` → merged `main`
+
+- Tạo `data_pipeline.py`: Class `DataPipeline` OOP, ~650 dòng, type hints + docstrings đầy đủ.
+- Kiến trúc: `ThreadPoolExecutor(max_workers=3)` kéo H1/M15/M5 **song song hoàn toàn**; Daemon Thread heartbeat/30s độc lập — không block Main Thread.
+- `mt5_reconnect()`: exponential backoff `[1,2,4,8,16,32,60]s` tối đa 10 lần, log mỗi attempt.
+- `validate_candles()`: Data Quality Score 0–1 (None/gap/OHLC/volume/count), score <0.60 skip, <0.30 trigger reconnect.
+- `is_session_active()`: London 07-12 / NY 13-17 UTC; skip Asian 21-05 UTC.
+- `_detect_server_tz()`: auto-detect Exness UTC offset (UTC+2/+3), normalize timestamp về UTC tuyệt đối.
+- Tạo `requirements.txt` (3 nhóm: Core Trading / Web Dashboard / ML) + `config/pipeline_config.json`.
+
+---
+
+## 🔄 Task 1.2 BẮT ĐẦU — `execution.py` (Order Manager Layer)
+
+**Date:** 2026-03-05 22:00 UTC+7 | **Branch:** `task-1.2-execution`
+
+*Xem phân tích kiến trúc chi tiết tại: `docs/walkthrough.md.resolved`*
