@@ -1,0 +1,100 @@
+{
+    "symbols": [
+        "US100",
+        "US30",
+        "XAUUSD",
+        "USOIL",
+        "EURUSD",
+        "GBPUSD",
+        "USDJPY"
+    ],
+    "magic_number": 20250305,
+    "loop_interval_sec": 1,
+    "in_trade_poll_interval_sec": 0.5,
+    "pending_order_timeout_sec": 30,
+    "min_data_quality": 0.60,
+    "pip_size": 0.0001,
+    "atr_period": 14,
+    "scan_interval_per_symbol_sec": 300,
+    "log": {
+        "path": "logs/system.log",
+        "max_bytes": 10485760,
+        "backup_count": 5
+    },
+    "pipeline": {
+        "heartbeat_interval_sec": 30,
+        "reconnect_max_attempts": 10,
+        "data_quality_min_score": 0.60,
+        "session_filters": {
+            "london_open_utc": [
+                7,
+                12
+            ],
+            "ny_open_utc": [
+                13,
+                17
+            ]
+        },
+        "timeframes": {
+            "H1": {
+                "mt5_tf": "TIMEFRAME_H1",
+                "candles": 200
+            },
+            "M15": {
+                "mt5_tf": "TIMEFRAME_M15",
+                "candles": 500
+            },
+            "M5": {
+                "mt5_tf": "TIMEFRAME_M5",
+                "candles": 1000
+            }
+        }
+    },
+    "strategy": {
+        "swing_lookback": 3,
+        "pip_size": 0.0001,
+        "fvg": {
+            "max_size": 20,
+            "ttl_candles": 48,
+            "buffer_pips": 2
+        },
+        "pinbar": {
+            "wick_ratio_min": 0.60,
+            "body_ratio_max": 0.35,
+            "min_candle_range_pips": 2
+        },
+        "vsa": {
+            "climax_multiplier": 1.5,
+            "adj_candle_multiplier": 1.2,
+            "min_session_candles": 10
+        },
+        "signal": {
+            "min_composite_score": 0.55
+        },
+        "sessions": {
+            "london": [
+                7,
+                12
+            ],
+            "ny": [
+                13,
+                17
+            ]
+        }
+    },
+    "risk": {
+        "risk_per_trade_pct": 0.03,
+        "atr_multiplier": 1.5,
+        "safety_net": {
+            "daily_drawdown_limit_pct": 0.15,
+            "consecutive_loss_streak": 3,
+            "cooldown_hours": 4,
+            "min_balance_floor_pct": 0.50
+        },
+        "volume": {
+            "min_lot": 0.01,
+            "max_lot": 100.0,
+            "volume_step": 0.01
+        }
+    }
+}

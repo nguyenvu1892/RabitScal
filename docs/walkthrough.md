@@ -702,3 +702,35 @@ RabitScal/
 - Entry = close Pinbar M5; SL = ngoài FVG boundary ± 2 pips buffer.
 
 *Phân tích kiến trúc chi tiết (tinh chỉnh Violated/Mitigated + TechLead Q&A 5 câu): `docs/walkthrough.md.resolved`*
+
+---
+
+## 🔄 Task 3.1: `main.py` + `main_config.json` — Implementation (PENDING TechLead snippet review v2)
+
+**Date:** 2026-03-05 23:57 UTC+7 | **Branch:** `task-3.1-main-orchestrator`
+
+- `main.py` ~400 dòng: Class `BotOrchestrator` OOP, 6-state machine (IDLE→SCANNING→SIGNAL_FOUND→PENDING_ORDER→IN_TRADE→CLOSING), graceful SIGTERM shutdown.
+- **Multi-symbol:** 7 cặp (`US100, US30, XAUUSD, USOIL, EURUSD, GBPUSD, USDJPY`); `StrategyEngine` một instance per symbol (FVG pool độc lập); `main_config.json` thay `"symbol"` → `"symbols"`.
+- **Global Lock Rule:** `open_trade is not None` → không scan symbol mới. 1 lệnh tối đa toàn account, enforce trong `_state_idle()`.
+- **[HOTFIX] Candle Sync:** Xóa `elapsed >= 300s`. Thay bằng `mt5.copy_rates_from_pos(sym, M5, 0, 2)` → so sánh `rates[-2]["time"] > last_candle_time[symbol]`. Bắt đúng từng giây khi nến M5 vừa đóng, không bao giờ lệch pha.
+- **[HOTFIX] Ghost Order null-safe:** `if orders is None: continue` (thay vì `break`) — mạng lag 1s trả None không làm gián đoạn vòng chờ 30s.
+- **[HOTFIX] magic_number từ config:** Xóa hardcode `20250305`. Lưu `self.magic_number = int(cfg.get("magic_number", 20260305))` từ `__init__`, dùng thống nhất khắp file.
+- **IN_TRADE poll 0.5s** (`IN_TRADE_POLL_INTERVAL_SEC`); tất cả state khác 1s — bắt floating DD breach sớm hơn.
+- **Daily reset Server Time:** `mt5.symbol_info_tick()` timestamp + `_server_tz_offset` (UTC+2/+3 Exness).
+- **Ghost Order full flow:** Timeout 30s → poll position (fill muộn → IN_TRADE) → cancel lệnh treo → IDLE.
+- `risk_config.json`: `daily_dd_limit 6%→15%`, `balance_floor 50%`.
+
+---
+
+## ✅ Task 3.1: `main.py` State Machine Orchestrator — HOÀN TẤT (TechLead APPROVED)
+
+**Date:** 2026-03-06 00:23 UTC+7 | **Branch:** `task-3.1-main-orchestrator` → merged `main`
+
+- `main.py` **787 dòng** — `BotOrchestrator` v1.0 hoàn chỉnh, 6-state machine (IDLE→SCANNING→SIGNAL_FOUND→PENDING_ORDER→IN_TRADE→CLOSING).
+- **[HOTFIX v2] Candle Sync:** `mt5.copy_rates_from_pos(sym, M5, 0, 2)` → so sánh `rates[-2]["time"] > last_candle_time[sym]` — đồng bộ chính xác từng giây khi nến M5 vừa đóng, không bao giờ lệch pha hay re-scan cùng nến.
+- **[HOTFIX v2] None API Guard:** `if result is None: continue` trong vòng lặp ghost-order poll — mạng lag trả None không crash vòng chờ 30s.
+- **[HOTFIX v2] magic_number từ config:** Xóa hardcode, đọc từ `cfg["magic_number"]`, dùng thống nhất trong `OrderManager` call.
+- Multi-symbol 7 cặp, Global Lock Rule (max 1 lệnh), `IN_TRADE_POLL_INTERVAL_SEC=0.5s`, daily reset theo Exness server time.
+- Ghost Order full flow: timeout 30s → poll position (fill muộn → IN_TRADE) → cancel lệnh treo → IDLE.
+- SIGTERM handler + graceful shutdown qua `stop()`.
+
