@@ -339,15 +339,17 @@ function onWsMessage(evt) {
         case 'signal_found':
             // Chỉ vẽ FVG khi đúng symbol đang xem
             if (symbol === currentSymbol) {
-                const now = new Date().toISOString();
-                const futureTime = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
+                // x0 = fvg_created_time (gốc thực của FVG từ quá khứ, không phải "now")
+                // x1 = 24h tương lai — box kéo dài cho đến khi bị mitigated
+                const fvgFrom = payload.fvg_created_time || new Date().toISOString();
+                const fvgTo = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
                 drawFVGBox(
                     `fvg-${msg.ts}`,
                     payload.direction,
                     payload.fvg_top || payload.entry_price + 0.0005,
                     payload.fvg_bottom || payload.entry_price - 0.0005,
-                    now,
-                    futureTime,
+                    fvgFrom,   // ← gốc đúng của FVG (nến tạo ra gap)
+                    fvgTo,
                 );
                 showSignalCard(payload);
             }

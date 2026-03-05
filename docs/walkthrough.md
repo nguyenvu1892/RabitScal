@@ -782,3 +782,20 @@ RabitScal/
 - **`templates/index.html`** (262 dòng): Dark theme CSS variables, grid 3-row/2-col layout, Plotly.js v2 CDN, 5 side-panel cards (BotState, Equity, DD Gauge, Open Trade, Last Signal), trade history table.
 - **`static/js/dashboard.js`** (625 dòng): Plotly candlestick init từ `/api/candles`, volume bars, 7 WS event handlers, `drawFVGBox()` dùng Plotly `layout.shapes` (rectangle), SL/TP horizontal lines (`xref:'paper'`), Entry arrow annotations, WS exponential backoff reconnect.
 
+
+---
+
+## ✅ Task 5.2 — Dashboard COMPLETE (TechLead fixes applied + MERGED)
+
+**Date:** 2026-03-06 01:41 UTC+7 | **Branch:** `task-5.2-dashboard` → **MERGED main**
+
+**Bug Fixes (TechLead directive):**
+- `index.html`: `grid-template-columns: 1fr` → `minmax(0, 1fr)` — ngăn Plotly canvas overflow container.
+- `main.py`: `signal_found` payload thêm `fvg_created_time` (ISO UTC string từ `fvg.created_time` hoặc `last_candle_time[symbol]`) — mốc gốc thực của FVG từ quá khứ.
+- `dashboard.js`: `case signal_found` dùng `payload.fvg_created_time` làm `x0` của Plotly shape rect — FVG box vẽ đúng gốc, không cụt.
+
+**Tổng hợp anh hàng đã deliver (Task 5.2):**
+- `dashboard.py` (644 dòng): FastAPI + WS Hub + DashboardPublisher + REST endpoints
+- `templates/index.html` (262 dòng): Grid layout dark theme, Plotly CDN, 5 panel cards
+- `static/js/dashboard.js` (625 dòng): Plotly init, drawFVGBox() shapes API, WS 7-event handler, WS auto-reconnect exponential backoff
+

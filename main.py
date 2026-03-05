@@ -349,17 +349,30 @@ class BotOrchestrator:
                 )
                 # Dashboard: publish signal_found với FVG info
                 fvg = getattr(signal, 'fvg', None)
+                # fvg_created_time: timestamp thực của nến tạo ra FVG
+                # Dùng fvg.created_time nếu có, fallback candle đang xét
+                fvg_created_ts = (
+                    getattr(fvg, 'created_time', None) or
+                    getattr(fvg, 'candle_time',  None) or
+                    self.last_candle_time.get(symbol, int(time.time()))
+                )
+                # Convert sang ISO string cho JS (Plotly dùng ISO làm xref='x')
+                fvg_created_iso = datetime.fromtimestamp(
+                    int(fvg_created_ts), tz=timezone.utc
+                ).isoformat() if fvg_created_ts else datetime.now(timezone.utc).isoformat()
+
                 dashboard_pub.publish({
                     "type":    "signal_found",
                     "ts":      int(time.time()),
                     "symbol":  symbol,
                     "payload": {
-                        "direction":   signal.direction,
-                        "score":       round(float(signal.score), 4),
-                        "entry_price": round(float(getattr(signal, 'entry_price', 0)), 5),
-                        "sl_price":    round(float(getattr(signal, 'sl_price', 0)), 5),
-                        "fvg_top":     round(float(fvg.top if fvg else 0), 5),
-                        "fvg_bottom":  round(float(fvg.bottom if fvg else 0), 5),
+                        "direction":        signal.direction,
+                        "score":            round(float(signal.score), 4),
+                        "entry_price":      round(float(getattr(signal, 'entry_price', 0)), 5),
+                        "sl_price":         round(float(getattr(signal, 'sl_price', 0)), 5),
+                        "fvg_top":          round(float(fvg.top    if fvg else 0), 5),
+                        "fvg_bottom":       round(float(fvg.bottom if fvg else 0), 5),
+                        "fvg_created_time": fvg_created_iso,  # ← Gốc thực của FVG box
                     },
                 })
                 self._transition(BotState.SIGNAL_FOUND)

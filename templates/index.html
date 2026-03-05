@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -10,253 +11,527 @@
 
   <!-- Google Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+    rel="stylesheet" />
 
   <style>
     /* ─── Reset & base ──────────────────────────────────────────────────── */
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-    :root {
-      --bg:          #0d0f14;
-      --panel:       rgba(255,255,255,0.04);
-      --border:      rgba(255,255,255,0.08);
-      --text:        #c9d1e0;
-      --muted:       #5a6370;
-      --bull:        #00d4a0;
-      --bear:        #ff4f6d;
-      --accent:      #5b8fff;
-      --warn:        #ffc44d;
-      --font:        'Inter', sans-serif;
-      --mono:        'JetBrains Mono', monospace;
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
     }
 
-    html, body { height: 100%; background: var(--bg); color: var(--text);
-                 font-family: var(--font); font-size: 13px; overflow: hidden; }
+    :root {
+      --bg: #0d0f14;
+      --panel: rgba(255, 255, 255, 0.04);
+      --border: rgba(255, 255, 255, 0.08);
+      --text: #c9d1e0;
+      --muted: #5a6370;
+      --bull: #00d4a0;
+      --bear: #ff4f6d;
+      --accent: #5b8fff;
+      --warn: #ffc44d;
+      --font: 'Inter', sans-serif;
+      --mono: 'JetBrains Mono', monospace;
+    }
+
+    html,
+    body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 13px;
+      overflow: hidden;
+    }
 
     /* ─── Layout ────────────────────────────────────────────────────────── */
-    .app { display: grid; height: 100vh;
-           grid-template-rows: 44px 1fr 180px;
-           grid-template-columns: 1fr 280px; }
+    .app {
+      display: grid;
+      height: 100vh;
+      grid-template-rows: 44px 1fr 180px;
+      grid-template-columns: minmax(0, 1fr) 280px;
+    }
 
     /* Header spans full width */
-    header { grid-column: 1/-1; display: flex; align-items: center;
-             padding: 0 20px; gap: 16px;
-             background: rgba(0,0,0,0.35);
-             border-bottom: 1px solid var(--border); }
+    header {
+      grid-column: 1/-1;
+      display: flex;
+      align-items: center;
+      padding: 0 20px;
+      gap: 16px;
+      background: rgba(0, 0, 0, 0.35);
+      border-bottom: 1px solid var(--border);
+    }
 
     /* Chart area */
-    #chart-wrap { grid-row: 2; grid-column: 1;
-                  position: relative; padding: 12px; }
-    #chart       { width: 100%; height: 100%; border-radius: 8px; }
+    #chart-wrap {
+      grid-row: 2;
+      grid-column: 1;
+      position: relative;
+      padding: 12px;
+    }
+
+    #chart {
+      width: 100%;
+      height: 100%;
+      border-radius: 8px;
+    }
 
     /* Side panel */
-    aside { grid-row: 2; grid-column: 2;
-            padding: 12px; display: flex; flex-direction: column; gap: 10px;
-            border-left: 1px solid var(--border); overflow-y: auto; }
+    aside {
+      grid-row: 2;
+      grid-column: 2;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      border-left: 1px solid var(--border);
+      overflow-y: auto;
+    }
 
     /* Bottom trade table */
-    .trade-panel { grid-column: 1/-1;
-                   border-top: 1px solid var(--border);
-                   overflow: hidden; display: flex; flex-direction: column; }
+    .trade-panel {
+      grid-column: 1/-1;
+      border-top: 1px solid var(--border);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
 
     /* ─── Panel cards ──────────────────────────────────────────────────── */
-    .card { background: var(--panel); border: 1px solid var(--border);
-            border-radius: 10px; padding: 12px; }
-    .card-title { font-size: 10px; font-weight: 600; letter-spacing: .08em;
-                  text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+    }
+
+    .card-title {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
 
     /* ─── Status badge ─────────────────────────────────────────────────── */
-    .state-badge { display: inline-flex; align-items: center; gap: 6px;
-                   padding: 4px 10px; border-radius: 20px; font-weight: 600;
-                   font-size: 12px; letter-spacing: .04em;
-                   background: rgba(91,143,255,0.15); color: var(--accent);
-                   border: 1px solid rgba(91,143,255,0.3); }
-    .state-badge.trade    { background: rgba(0,212,160,0.15); color: var(--bull);
-                            border-color: rgba(0,212,160,0.3); }
-    .state-badge.warn  { background: rgba(255,196,77,0.15); color: var(--warn);
-                            border-color: rgba(255,196,77,0.3); }
-    .state-badge.danger   { background: rgba(255,79,109,0.15); color: var(--bear);
-                            border-color: rgba(255,79,109,0.3); }
-    .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor;
-           animation: pulse 2s infinite; }
-    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+    .state-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-weight: 600;
+      font-size: 12px;
+      letter-spacing: .04em;
+      background: rgba(91, 143, 255, 0.15);
+      color: var(--accent);
+      border: 1px solid rgba(91, 143, 255, 0.3);
+    }
+
+    .state-badge.trade {
+      background: rgba(0, 212, 160, 0.15);
+      color: var(--bull);
+      border-color: rgba(0, 212, 160, 0.3);
+    }
+
+    .state-badge.warn {
+      background: rgba(255, 196, 77, 0.15);
+      color: var(--warn);
+      border-color: rgba(255, 196, 77, 0.3);
+    }
+
+    .state-badge.danger {
+      background: rgba(255, 79, 109, 0.15);
+      color: var(--bear);
+      border-color: rgba(255, 79, 109, 0.3);
+    }
+
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+
+      0%,
+      100% {
+        opacity: 1
+      }
+
+      50% {
+        opacity: .4
+      }
+    }
 
     /* ─── Equity nums ──────────────────────────────────────────────────── */
-    .big-num   { font-size: 22px; font-weight: 700; font-family: var(--mono); }
-    .small-num { font-size: 12px; font-family: var(--mono); color: var(--muted); margin-top: 2px; }
-    .pos { color: var(--bull); } .neg { color: var(--bear); }
+    .big-num {
+      font-size: 22px;
+      font-weight: 700;
+      font-family: var(--mono);
+    }
+
+    .small-num {
+      font-size: 12px;
+      font-family: var(--mono);
+      color: var(--muted);
+      margin-top: 2px;
+    }
+
+    .pos {
+      color: var(--bull);
+    }
+
+    .neg {
+      color: var(--bear);
+    }
 
     /* ─── DD Gauge ─────────────────────────────────────────────────────── */
-    .gauge-track { height: 6px; background: rgba(255,255,255,0.08);
-                   border-radius: 3px; overflow: hidden; margin: 4px 0; }
-    .gauge-fill  { height: 100%; border-radius: 3px; transition: width .6s ease;
-                   background: var(--bull); }
-    .gauge-fill.warn  { background: var(--warn); }
-    .gauge-fill.danger{ background: var(--bear); }
-    .gauge-labels { display: flex; justify-content: space-between;
-                    font-size: 10px; color: var(--muted); margin-top: 2px; }
+    .gauge-track {
+      height: 6px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 3px;
+      overflow: hidden;
+      margin: 4px 0;
+    }
+
+    .gauge-fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width .6s ease;
+      background: var(--bull);
+    }
+
+    .gauge-fill.warn {
+      background: var(--warn);
+    }
+
+    .gauge-fill.danger {
+      background: var(--bear);
+    }
+
+    .gauge-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+      color: var(--muted);
+      margin-top: 2px;
+    }
 
     /* ─── Open Trade card ─────────────────────────────────────────────── */
-    .trade-row { display: flex; justify-content: space-between;
-                 padding: 3px 0; font-size: 12px; }
-    .trade-row span:last-child { font-family: var(--mono); }
+    .trade-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 3px 0;
+      font-size: 12px;
+    }
+
+    .trade-row span:last-child {
+      font-family: var(--mono);
+    }
 
     /* ─── Signal badge ─────────────────────────────────────────────────── */
-    .signal-card { border-color: rgba(0,212,160,0.25); }
-    .signal-dir  { font-size: 18px; font-weight: 700; margin-bottom: 4px; }
+    .signal-card {
+      border-color: rgba(0, 212, 160, 0.25);
+    }
+
+    .signal-dir {
+      font-size: 18px;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
 
     /* ─── Header elements ──────────────────────────────────────────────── */
-    .logo { font-weight: 700; font-size: 15px; letter-spacing: .02em; }
-    .logo span { color: var(--bull); }
-    .ws-indicator { margin-left: auto; display: flex; align-items: center; gap: 6px;
-                    font-size: 11px; color: var(--muted); }
-    .ws-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--bear); }
-    .ws-dot.connected { background: var(--bull); }
+    .logo {
+      font-weight: 700;
+      font-size: 15px;
+      letter-spacing: .02em;
+    }
 
-    select { background: rgba(255,255,255,0.06); border: 1px solid var(--border);
-             color: var(--text); padding: 4px 8px; border-radius: 6px; font-size: 12px;
-             cursor: pointer; outline: none; }
+    .logo span {
+      color: var(--bull);
+    }
+
+    .ws-indicator {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .ws-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--bear);
+    }
+
+    .ws-dot.connected {
+      background: var(--bull);
+    }
+
+    select {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 4px 8px;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+      outline: none;
+    }
 
     /* ─── Trade table ──────────────────────────────────────────────────── */
-    .trade-panel-header { padding: 6px 16px; font-size: 10px; font-weight: 600;
-                          letter-spacing: .08em; text-transform: uppercase;
-                          color: var(--muted); background: rgba(0,0,0,0.2); }
-    .trade-table-wrap { flex: 1; overflow-y: auto; }
-    table { width: 100%; border-collapse: collapse; }
-    thead th { padding: 5px 12px; text-align: left; font-size: 10px; font-weight: 600;
-               letter-spacing: .06em; text-transform: uppercase; color: var(--muted);
-               border-bottom: 1px solid var(--border); position: sticky; top: 0;
-               background: var(--bg); }
-    tbody tr { border-bottom: 1px solid rgba(255,255,255,0.03); }
-    tbody tr:hover { background: rgba(255,255,255,0.03); }
-    tbody td { padding: 5px 12px; font-size: 12px; font-family: var(--mono); }
-    .dir-buy  { color: var(--bull); font-weight: 600; }
-    .dir-sell { color: var(--bear); font-weight: 600; }
-    .pnl-pos  { color: var(--bull); } .pnl-neg { color: var(--bear); }
-    .reason   { font-size: 10px; background: rgba(255,255,255,0.06);
-                padding: 1px 6px; border-radius: 4px; }
+    .trade-panel-header {
+      padding: 6px 16px;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      background: rgba(0, 0, 0, 0.2);
+    }
+
+    .trade-table-wrap {
+      flex: 1;
+      overflow-y: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    thead th {
+      padding: 5px 12px;
+      text-align: left;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      background: var(--bg);
+    }
+
+    tbody tr {
+      border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+    }
+
+    tbody tr:hover {
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    tbody td {
+      padding: 5px 12px;
+      font-size: 12px;
+      font-family: var(--mono);
+    }
+
+    .dir-buy {
+      color: var(--bull);
+      font-weight: 600;
+    }
+
+    .dir-sell {
+      color: var(--bear);
+      font-weight: 600;
+    }
+
+    .pnl-pos {
+      color: var(--bull);
+    }
+
+    .pnl-neg {
+      color: var(--bear);
+    }
+
+    .reason {
+      font-size: 10px;
+      background: rgba(255, 255, 255, 0.06);
+      padding: 1px 6px;
+      border-radius: 4px;
+    }
 
     /* ─── Overlay message ──────────────────────────────────────────────── */
-    #chart-msg { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
-                 color: var(--muted); font-size: 13px; text-align: center;
-                 pointer-events: none; }
-    #chart-msg.hidden { display: none; }
+    #chart-msg {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: var(--muted);
+      font-size: 13px;
+      text-align: center;
+      pointer-events: none;
+    }
+
+    #chart-msg.hidden {
+      display: none;
+    }
 
     /* ─── Flash banner ─────────────────────────────────────────────────── */
-    #safety-banner { position: fixed; top: 44px; left: 0; right: 0; z-index: 100;
-                     padding: 8px 20px; font-weight: 600; font-size: 13px;
-                     background: rgba(255,79,109,0.85); color: #fff; text-align: center;
-                     display: none; }
-    #safety-banner.show { display: block; animation: slide-in .3s ease; }
-    @keyframes slide-in { from{transform:translateY(-100%)} to{transform:translateY(0)} }
+    #safety-banner {
+      position: fixed;
+      top: 44px;
+      left: 0;
+      right: 0;
+      z-index: 100;
+      padding: 8px 20px;
+      font-weight: 600;
+      font-size: 13px;
+      background: rgba(255, 79, 109, 0.85);
+      color: #fff;
+      text-align: center;
+      display: none;
+    }
+
+    #safety-banner.show {
+      display: block;
+      animation: slide-in .3s ease;
+    }
+
+    @keyframes slide-in {
+      from {
+        transform: translateY(-100%)
+      }
+
+      to {
+        transform: translateY(0)
+      }
+    }
   </style>
 </head>
+
 <body>
-<div class="app">
+  <div class="app">
 
-  <!-- ── HEADER ─────────────────────────────────────────────────────────── -->
-  <header>
-    <div class="logo">🐰 Rabit<span>Scal</span></div>
+    <!-- ── HEADER ─────────────────────────────────────────────────────────── -->
+    <header>
+      <div class="logo">🐰 Rabit<span>Scal</span></div>
 
-    <select id="sel-symbol" onchange="onSymbolChange()">
-      <option value="EURUSDc">EURUSDc</option>
-      <option value="GBPUSDc">GBPUSDc</option>
-      <option value="USDJPYc">USDJPYc</option>
-      <option value="XAUUSDc">XAUUSDc</option>
-    </select>
+      <select id="sel-symbol" onchange="onSymbolChange()">
+        <option value="EURUSDc">EURUSDc</option>
+        <option value="GBPUSDc">GBPUSDc</option>
+        <option value="USDJPYc">USDJPYc</option>
+        <option value="XAUUSDc">XAUUSDc</option>
+      </select>
 
-    <select id="sel-tf" onchange="onTfChange()">
-      <option value="M5" selected>M5</option>
-      <option value="M15">M15</option>
-      <option value="H1">H1</option>
-    </select>
+      <select id="sel-tf" onchange="onTfChange()">
+        <option value="M5" selected>M5</option>
+        <option value="M15">M15</option>
+        <option value="H1">H1</option>
+      </select>
 
-    <div class="ws-indicator">
-      <div class="ws-dot" id="ws-dot"></div>
-      <span id="ws-label">Connecting…</span>
+      <div class="ws-indicator">
+        <div class="ws-dot" id="ws-dot"></div>
+        <span id="ws-label">Connecting…</span>
+      </div>
+    </header>
+
+    <!-- ── SAFETY BANNER (hidden until needed) ────────────────────────────── -->
+    <div id="safety-banner"></div>
+
+    <!-- ── CHART ──────────────────────────────────────────────────────────── -->
+    <div id="chart-wrap">
+      <div id="chart"></div>
+      <div id="chart-msg">⏳ Loading candles…</div>
     </div>
-  </header>
 
-  <!-- ── SAFETY BANNER (hidden until needed) ────────────────────────────── -->
-  <div id="safety-banner"></div>
+    <!-- ── SIDE PANEL ─────────────────────────────────────────────────────── -->
+    <aside>
 
-  <!-- ── CHART ──────────────────────────────────────────────────────────── -->
-  <div id="chart-wrap">
-    <div id="chart"></div>
-    <div id="chart-msg">⏳ Loading candles…</div>
-  </div>
+      <!-- Bot State -->
+      <div class="card">
+        <div class="card-title">Bot Status</div>
+        <div class="state-badge" id="state-badge"><span class="dot"></span><span id="state-text">IDLE</span></div>
+        <div style="margin-top:8px; font-size:11px; color:var(--muted);">
+          Safety: <span id="safety-status" style="color:var(--bull)">ACTIVE</span>
+        </div>
+      </div>
 
-  <!-- ── SIDE PANEL ─────────────────────────────────────────────────────── -->
-  <aside>
+      <!-- Equity -->
+      <div class="card">
+        <div class="card-title">Equity</div>
+        <div class="big-num" id="equity-num">$—</div>
+        <div class="small-num">Balance: <span id="balance-num">$—</span></div>
+        <div class="small-num" style="margin-top:4px;">
+          Float P&L: <span id="pnl-num">—</span>
+        </div>
+      </div>
 
-    <!-- Bot State -->
-    <div class="card">
-      <div class="card-title">Bot Status</div>
-      <div class="state-badge" id="state-badge"><span class="dot"></span><span id="state-text">IDLE</span></div>
-      <div style="margin-top:8px; font-size:11px; color:var(--muted);">
-        Safety: <span id="safety-status" style="color:var(--bull)">ACTIVE</span>
+      <!-- DD Gauge -->
+      <div class="card">
+        <div class="card-title">Daily Drawdown</div>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+          <span class="big-num" style="font-size:18px;" id="dd-pct">0.00%</span>
+          <span style="font-size:10px; color:var(--muted);">limit 6%</span>
+        </div>
+        <div class="gauge-track">
+          <div class="gauge-fill" id="dd-gauge" style="width:0%"></div>
+        </div>
+        <div class="gauge-labels"><span>0%</span><span>6%</span><span>15% HALT</span></div>
+      </div>
+
+      <!-- Open Trade -->
+      <div class="card" id="open-trade-card" style="display:none;">
+        <div class="card-title">Open Trade</div>
+        <div id="open-trade-body"></div>
+      </div>
+
+      <!-- Last Signal -->
+      <div class="card signal-card" id="signal-card" style="display:none;">
+        <div class="card-title">Last Signal</div>
+        <div class="signal-dir" id="signal-dir">—</div>
+        <div class="trade-row"><span>Score</span><span id="signal-score">—</span></div>
+        <div class="trade-row"><span>Entry</span><span id="signal-entry">—</span></div>
+      </div>
+
+    </aside>
+
+    <!-- ── TRADE TABLE ────────────────────────────────────────────────────── -->
+    <div class="trade-panel">
+      <div class="trade-panel-header">Trade History</div>
+      <div class="trade-table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Ticket</th>
+              <th>Dir</th>
+              <th>Entry</th>
+              <th>SL</th>
+              <th>TP</th>
+              <th>Close</th>
+              <th>Lot</th>
+              <th>P&L</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody id="trade-tbody">
+            <tr>
+              <td colspan="9" style="color:var(--muted); text-align:center; padding:12px;">Loading…</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </div>
 
-    <!-- Equity -->
-    <div class="card">
-      <div class="card-title">Equity</div>
-      <div class="big-num" id="equity-num">$—</div>
-      <div class="small-num">Balance: <span id="balance-num">$—</span></div>
-      <div class="small-num" style="margin-top:4px;">
-        Float P&L: <span id="pnl-num">—</span>
-      </div>
-    </div>
+  </div><!-- .app -->
 
-    <!-- DD Gauge -->
-    <div class="card">
-      <div class="card-title">Daily Drawdown</div>
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
-        <span class="big-num" style="font-size:18px;" id="dd-pct">0.00%</span>
-        <span style="font-size:10px; color:var(--muted);">limit 6%</span>
-      </div>
-      <div class="gauge-track"><div class="gauge-fill" id="dd-gauge" style="width:0%"></div></div>
-      <div class="gauge-labels"><span>0%</span><span>6%</span><span>15% HALT</span></div>
-    </div>
-
-    <!-- Open Trade -->
-    <div class="card" id="open-trade-card" style="display:none;">
-      <div class="card-title">Open Trade</div>
-      <div id="open-trade-body"></div>
-    </div>
-
-    <!-- Last Signal -->
-    <div class="card signal-card" id="signal-card" style="display:none;">
-      <div class="card-title">Last Signal</div>
-      <div class="signal-dir" id="signal-dir">—</div>
-      <div class="trade-row"><span>Score</span><span id="signal-score">—</span></div>
-      <div class="trade-row"><span>Entry</span><span id="signal-entry">—</span></div>
-    </div>
-
-  </aside>
-
-  <!-- ── TRADE TABLE ────────────────────────────────────────────────────── -->
-  <div class="trade-panel">
-    <div class="trade-panel-header">Trade History</div>
-    <div class="trade-table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Ticket</th><th>Dir</th><th>Entry</th>
-            <th>SL</th><th>TP</th><th>Close</th>
-            <th>Lot</th><th>P&L</th><th>Reason</th>
-          </tr>
-        </thead>
-        <tbody id="trade-tbody">
-          <tr><td colspan="9" style="color:var(--muted); text-align:center; padding:12px;">Loading…</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </div>
-
-</div><!-- .app -->
-
-<!-- ── JAVASCRIPT ────────────────────────────────────────────────────────── -->
-<script src="/static/js/dashboard.js"></script>
+  <!-- ── JAVASCRIPT ────────────────────────────────────────────────────────── -->
+  <script src="/static/js/dashboard.js"></script>
 </body>
+
 </html>
