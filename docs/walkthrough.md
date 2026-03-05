@@ -646,8 +646,20 @@ RabitScal/
 
 ---
 
-## 🔄 Task 1.2 BẮT ĐẦU — `execution.py` (Order Manager Layer)
+## 🔄 Task 1.2: `execution.py` — Design Phase (TechLead APPROVED + 3 Fixes)
 
-**Date:** 2026-03-05 22:00 UTC+7 | **Branch:** `task-1.2-execution`
+**Date:** 2026-03-05 22:11 UTC+7 | **Branch:** `task-1.2-execution`
 
-*Xem phân tích kiến trúc chi tiết tại: `docs/walkthrough.md.resolved`*
+- Thiết kế Class `OrderManager` OOP: `send_order()`, `check_spread()`, `calculate_order_params()`, `validate_order_params()`, `_handle_retcode()`, `_log_trade()`.
+- Fill-or-Kill: retry tối đa 3 lần, mỗi lần fetch `bid/ask` realtime → tính lại `Entry/SL/TP` mới.
+- TechLead phát hiện **3 lỗi chí mạng** và yêu cầu fix trước khi code: (1) thêm `magic_number` vào TradeRequest, (2) gắn `sl/tp` trực tiếp vào `order_send()` (không OrderModify sau), (3) làm tròn `lot` theo `volume_step` tránh `INVALID_VOLUME`.
+- Log lý do từ chối: `SPREAD_TOO_HIGH` / `REQUOTE_MAX` / `TIMEOUT` / `BROKER_LIMIT`.
+- Output: `data/trade_log.csv` (ticket, slippage_pips, spread, commission, reject_reason, attempts).
+
+*Phân tích kiến trúc chi tiết: `docs/walkthrough.md.resolved`*
+
+---
+
+## 💻 Task 1.2: `execution.py` — Implementation (PENDING TechLead Review)
+
+**Date:** 2026-03-05 22:11 UTC+7
