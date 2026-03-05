@@ -753,3 +753,49 @@ RabitScal/
 - **CLI:** `python ml_model.py [--resume] [--trials N] [--workers N] [--fetch] [--log-level]`
 - Tạo `config/ml_config.json` (n_trials=500, n_workers=48, oos=24h, promote=0.95).
 
+
+---
+
+## 🔄 Task 5.2 — Backend `dashboard.py` Complete (PENDING TechLead snippet review)
+
+**Date:** 2026-03-06 01:23 UTC+7 | **Branch:** `task-5.2-dashboard`
+
+- `dashboard.py` **581 dòng** — FastAPI app, DashboardHub (WebSocket manager), DashboardPublisher (asyncio.Queue bridge), REST endpoints, uvicorn launcher.
+- **Architecture (Option B, 1 process):** uvicorn chạy trong daemon thread từ `main.py`. Communication qua `asyncio.Queue.put_nowait()` in-memory — zero blocking cho trading loop.
+- **DashboardPublisher:** `call_soon_threadsafe()` → `put_nowait()` — thread-safe bridge từ sync `main.py` sang async FastAPI event loop. Queue đầy → discard silently, bot không bao giờ bị block.
+- **DashboardHub:** WebSocket manager, auto-cleanup dead clients, gửi `snapshot` event ngay khi client mới connect.
+- **REST endpoints:** `GET /api/candles` (MT5 → Plotly format), `GET /api/trades` (trade_log.csv), `GET /api/status` (shared_state), `GET /api/health`.
+- **WS endpoint:** `/ws` — realtime event stream: state_change, candle_close, signal_found, order_filled, equity_update, trade_closed, safety_event.
+- **main.py patch:** Import dashboard với try/except fallback (`_NullPub`), `_start_dashboard()` daemon thread, `dashboard_pub.publish()` tại `_transition`, `_state_scanning`, `_state_pending_order`, `_state_in_trade`, `_state_closing`.
+- **Chart library:** Plotly.js (per TechLead directive) — FVG box dùng `shapes`, không cần hack.
+- **Bind:** `127.0.0.1:8888` — SSH tunnel để access từ ngoài.
+
+
+---
+
+## 🔄 Task 5.2 — Frontend Complete + Backend Fixed (PENDING TechLead snippet review)
+
+**Date:** 2026-03-06 01:31 UTC+7 | **Branch:** `task-5.2-dashboard`
+
+- **Fix `/api/candles`:** Đọc từ `DataPipeline.get_data(tf)` trước (RAM, zero MT5 call). Convert numpy structured ndarray → Plotly format. Chỉ fallback `mt5.copy_rates_from_pos()` khi pipeline `None`. Response thêm `source: "pipeline_cache"|"mt5_direct"` để debug.
+- **`set_pipeline()`:** Inject DataPipeline reference trước khi spawn uvicorn thread. `_pipeline_ref` global được set 1 lần tại `BotOrchestrator._start_dashboard()`.
+- **`templates/index.html`** (262 dòng): Dark theme CSS variables, grid 3-row/2-col layout, Plotly.js v2 CDN, 5 side-panel cards (BotState, Equity, DD Gauge, Open Trade, Last Signal), trade history table.
+- **`static/js/dashboard.js`** (625 dòng): Plotly candlestick init từ `/api/candles`, volume bars, 7 WS event handlers, `drawFVGBox()` dùng Plotly `layout.shapes` (rectangle), SL/TP horizontal lines (`xref:'paper'`), Entry arrow annotations, WS exponential backoff reconnect.
+
+
+---
+
+## ✅ Task 5.2 — Dashboard COMPLETE (TechLead fixes applied + MERGED)
+
+**Date:** 2026-03-06 01:41 UTC+7 | **Branch:** `task-5.2-dashboard` → **MERGED main**
+
+**Bug Fixes (TechLead directive):**
+- `index.html`: `grid-template-columns: 1fr` → `minmax(0, 1fr)` — ngăn Plotly canvas overflow container.
+- `main.py`: `signal_found` payload thêm `fvg_created_time` (ISO UTC string từ `fvg.created_time` hoặc `last_candle_time[symbol]`) — mốc gốc thực của FVG từ quá khứ.
+- `dashboard.js`: `case signal_found` dùng `payload.fvg_created_time` làm `x0` của Plotly shape rect — FVG box vẽ đúng gốc, không cụt.
+
+**Tổng hợp anh hàng đã deliver (Task 5.2):**
+- `dashboard.py` (644 dòng): FastAPI + WS Hub + DashboardPublisher + REST endpoints
+- `templates/index.html` (262 dòng): Grid layout dark theme, Plotly CDN, 5 panel cards
+- `static/js/dashboard.js` (625 dòng): Plotly init, drawFVGBox() shapes API, WS 7-event handler, WS auto-reconnect exponential backoff
+
