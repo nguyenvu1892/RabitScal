@@ -258,3 +258,280 @@ Bản Master Plan có nền tảng chiến lược vững chắc (SMC + VSA + Mu
 ---
 
 *Báo cáo được tạo bởi Antigravity — 2026-03-05 | Rabit_Exness AI Project*
+
+---
+
+## Task 1.1: Thiết kế kiến trúc module Data Pipeline & Tối ưu Phần cứng
+
+**Date:** 2026-03-05 | **Branch:** `task-1.1-data-pipeline` | **Author:** Antigravity
+
+---
+
+### Nội dung thay đổi/hoạt động
+
+Phân tích và thiết kế toàn bộ kiến trúc module `data_pipeline.py` (Giai đoạn 1) — module nền tảng toàn hệ thống Rabit_Exness AI. Không viết code thực thi phần cứng cho đến khi TechLead phê duyệt thiết kế này.
+
+---
+
+### 🖥️ PHÂN TÍCH PHẦN CỨNG — Cơ sở để thiết kế kiến trúc
+
+**Server hiện tại:**
+- **CPU:** Dual Intel Xeon E5-2680 v4 @ 2.40GHz — 2 Sockets × 14 Cores × 2 HT = **56 Logical Threads**
+- **RAM:** 96GB — đủ để cache toàn bộ tick history nhiều năm cặp tiền tệ in-memory (không cần HDD I/O)
+- **Storage:** SSD — write latency thấp, phù hợp ghi log liên tục tốc độ cao
+- **GPU:** NVIDIA — sẽ phát huy vai trò tại Giai đoạn 4 (`ml_model.py` — Bayesian/GA optimization)
+
+**Bản đồ phân công Thread cho toàn hệ thống (tầm nhìn dài hạn):**
+
+```
+56 Total Logical Threads
+│
+├─ [Nhóm A] Giai đoạn 1 — Data Pipeline (Task 1.1 này)
+│       ├─ Thread-1 : fetch_h1()          → kéo candle H1 từ MT5
+│       ├─ Thread-2 : fetch_m15()         → kéo candle M15 từ MT5
+│       ├─ Thread-3 : fetch_m5()          → kéo candle M5 từ MT5
+│       └─ Thread-4 : _heartbeat_loop()   → Daemon, ping MT5/30s
+│
+├─ [Nhóm B] Giai đoạn 2—5 — Main Bot Loop (main.py State Machine)
+│       └─ Thread-5 : Main Thread         → IDLE→SCANNING→SIGNAL→TRADE→CLOSE
+│
+└─ [Nhóm C] Giai đoạn 4 — ML Optimization (Tương lai: ProcessPoolExecutor)
+        └─ 48–51 Workers                  → Bayesian/GA brute-force search
+                                            Full 56 cores, bypass GIL bằng
+                                            multiprocessing (subprocess per core)
+```
+
+> **Nhận định:** Với workload hiện tại (chỉ 1 cặp tiền, 3 timeframes), `data_pipeline.py` chỉ cần 4 threads. 52 threads còn lại là "dự trữ chiến lược" cho khi `ml_model.py` kích hoạt ProcessPoolExecutor — đây là thiết kế đúng: **không over-thread giai đoạn sớm, nhưng phải kiến trúc để scale được**.
+
+---
+
+### ⚙️ LÝ DO CHỌN `ThreadPoolExecutor` THAY VÌ `asyncio`
+
+Đây là quyết định kiến trúc quan trọng nhất của module này.
+
+| Tiêu chí | `asyncio` | `ThreadPoolExecutor` ✅ |
+|----------|-----------|----------------------|
+| Phù hợp với MT5 Python API | ❌ API là **blocking/synchronous** — `asyncio` không đạt concurrency thực sự mà không wrap thêm `loop.run_in_executor()` | ✅ Mỗi blocking call `mt5.copy_rates_from_pos()` chạy trên OS thread riêng biệt |
+| Độ phức tạp implementation | Cao hơn — cần `async def`, `await`, event loop management | Thấp hơn — code quen thuộc, dễ debug |
+| Phù hợp với I/O-bound workload | ✅ Tốt nhất cho native-async I/O | ✅ Tốt cho blocking I/O với thread pool |
+| Thread Safety với dữ liệu shared | Tốt (single-threaded event loop) | Cần `RLock` — dễ implement |
+| Hướng đến ProcessPoolExecutor tương lai | Khó bridge | ✅ Dễ dàng — cùng Executor interface |
+
+**Kết luận:** `ThreadPoolExecutor(max_workers=3)` là lựa chọn tối ưu cho wrapping MT5 blocking API vào concurrent workers. `asyncio` sẽ được xem xét lại nếu hệ thống chuyển sang REST API async trong tương lai.
+
+---
+
+### 🏗️ THIẾT KẾ CLASS `DataPipeline` (OOP Architecture)
+
+```
+class DataPipeline
+│
+├─ __init__(config: dict, logger: logging.Logger)
+│       Khởi tạo: connection params, executor, RLock,
+│       internal data store (dict: tf → numpy array),
+│       session config, validator thresholds
+│
+├─ start() → None
+│       Spawn heartbeat daemon thread
+│       Submit fetch_all() lần đầu vào executor
+│       Set internal flag _running = True
+│
+├─ stop() → None
+│       Graceful shutdown: _running = False
+│       executor.shutdown(wait=True)
+│       Ghi log "DataPipeline stopped"
+│
+├─ fetch_all() → dict[str, np.ndarray]
+│       executor.map(_fetch_candles, ["H1","M15","M5"])
+│       Trả về mapping tf → validated numpy array
+│       Ghi metrics (latency, data quality score) vào system.log
+│
+├─ _fetch_candles(timeframe: str) → np.ndarray | None    [PRIVATE — chạy trong worker thread]
+│       1. Gọi mt5.copy_rates_from_pos() với retry
+│       2. Nếu None → gọi mt5_reconnect()
+│       3. Gọi validate_candles() trên kết quả
+│       4. Chuẩn hóa UTC: rates["time"] += tz_offset
+│       5. Update _data_store[timeframe] dưới RLock
+│
+├─ mt5_reconnect() → bool
+│       Vòng lặp exponential backoff:
+│         attempt 1: sleep 1s → mt5.initialize()
+│         attempt 2: sleep 2s → mt5.initialize()
+│         attempt 3: sleep 4s → mt5.initialize()
+│         ...max sleep 60s
+│         max_attempts = 10 → nếu vượt: log CRITICAL, return False
+│       Mỗi attempt ghi log: "Reconnect attempt N/10, wait Xs"
+│
+├─ _heartbeat_loop() → None                              [PRIVATE — Daemon Thread]
+│       while _running:
+│           sleep(30)
+│           info = mt5.terminal_info()
+│           if info is None hoặc info.connected == False:
+│               log WARNING "Heartbeat lost → triggering reconnect"
+│               mt5_reconnect()
+│
+├─ validate_candles(rates: np.ndarray, tf: str) → np.ndarray | None
+│       Check 1: rates is None hoặc len(rates) == 0 → return None, log ERROR
+│       Check 2: Phát hiện time gap bất thường
+│                (delta > expected_interval[tf] * 1.5) → log WARNING, flag candle
+│       Check 3: Giá trị OHLC hợp lệ (open/high/low/close > 0, high >= low)
+│       Return: ndarray đã validated, hoặc None nếu fail critical check
+│
+├─ is_session_active() → bool
+│       Đọc giờ UTC hiện tại
+│       London Open:  08:00–12:00 UTC
+│       NY Open:      13:00–17:00 UTC
+│       Asian Avoid:  00:00–06:00 UTC (thanh khoản thấp)
+│       Return True nếu trong giờ active, False nếu outside
+│
+└─ get_data(timeframe: str) → np.ndarray | None          [PUBLIC — Thread-safe]
+        with self._lock:
+            return self._data_store.get(timeframe, None)
+```
+
+---
+
+### 🔌 CƠ CHẾ RECONNECT — Exponential Backoff Chi Tiết
+
+```python
+# Pseudocode minh họa cơ chế mt5_reconnect()
+
+BACKOFF_SEQUENCE = [1, 2, 4, 8, 16, 32, 60, 60, 60, 60]  # seconds (max 60s)
+MAX_ATTEMPTS = 10
+
+for attempt, wait in enumerate(BACKOFF_SEQUENCE, start=1):
+    log.warning(f"[MT5] Reconnect attempt {attempt}/{MAX_ATTEMPTS}, waiting {wait}s...")
+    time.sleep(wait)
+
+    mt5.shutdown()  # Reset connection trước
+    if mt5.initialize(**connection_params):
+        log.info(f"[MT5] Reconnected successfully on attempt {attempt}")
+        return True
+
+log.critical("[MT5] FAILED after 10 attempts. DataPipeline HALTED.")
+# Trigger safety mechanism → notify main.py State Machine to enter IDLE
+return False
+```
+
+---
+
+### 📡 SESSION FILTER — Chỉ chạy giờ thanh khoản cao
+
+Dựa trên nghiên cứu volume Forex thực tế (Exness Standard Cent liquidity patterns):
+
+| Session | Giờ UTC | Đặc điểm | Hành động |
+|---------|---------|----------|-----------|
+| **London Open** | 07:00–12:00 | Volume cao nhất, spread thấp, SMC signal mạnh | ✅ ACTIVE — full scan |
+| **NY Open** | 13:00–17:00 | Volume cao, overlap tốt, momentum mạnh | ✅ ACTIVE — full scan |
+| **London-NY Overlap** | 12:00–13:00 | Cực kỳ volatile, spread tăng đột biến | ⚠️ CAUTION — scan nhưng tăng ngưỡng VSA |
+| **Asian Session** | 21:00–05:00 | Volume thấp, false FVG nhiều | ❌ INACTIVE — skip signal |
+| **News Window** | ±15 phút xung quanh tin | Spread tăng 10x-50x | ❌ BLOCKED — tự động skip |
+
+> **Lưu ý WSL:** Server đang chạy Linux (WSL trên Windows). `datetime.utcnow()` hoạt động chuẩn trong Python. Không phụ thuộc vào timezone OS — mọi thứ xử lý UTC absolute.
+
+---
+
+### 📊 DATA VALIDATOR — Tiêu chí Quality Score
+
+Module validator trả về kèm một **Data Quality Score (0.0–1.0)** cho mỗi batch fetch:
+
+| Kiểm tra | Trọng số | Điều kiện Pass |
+|----------|----------|----------------|
+| None check | Critical (fail = skip batch) | `rates is not None and len > 0` |
+| Time gap normality | 0.40 | `max_gap <= expected_interval * 1.5` |
+| OHLC validity | 0.30 | `high >= low`, tất cả giá > 0 |
+| Volume availability | 0.20 | `tick_volume > 0` ít nhất 95% candle |
+| Candle count | 0.10 | Đủ số candle yêu cầu (H1:200, M15:500, M5:1000) |
+
+Score < 0.60 → log WARNING + bỏ qua batch này, giữ nguyên data cũ.  
+Score < 0.30 → log ERROR + trigger reconnect.
+
+---
+
+### 🔮 THIẾT KẾ HƯỚNG TỚI `ProcessPoolExecutor` (Giai đoạn 4)
+
+`DataPipeline` được thiết kế để `ml_model.py` và `backtest_env.py` có thể consume data dễ dàng:
+
+1. **Dữ liệu lưu dạng `numpy ndarray`** — serializable, zero-copy compatible với `multiprocessing.shared_memory`
+2. **Public getter `get_data(tf)`** trả về numpy array — `ProcessPoolExecutor` workers chỉ cần gọi hàm này, không cần biết cơ chế bên trong
+3. **Tách biệt hoàn toàn** IO thread pool (ThreadPoolExecutor) và CPU thread pool (ProcessPoolExecutor tương lai) — không share executor, không deadlock
+
+```
+Khi ml_model.py kích hoạt (Giai đoạn 4):
+
+ProcessPoolExecutor(max_workers=48)   ← chiếm 48/56 cores cho Bayesian/GA search
+    ├─ Worker-1:  evaluate_config(config_v001)
+    ├─ Worker-2:  evaluate_config(config_v002)
+    ├─ ...
+    └─ Worker-48: evaluate_config(config_v048)
+
+# Mỗi worker đọc data từ DataPipeline.get_data() → tính PnL độc lập
+# Không conflict, không GIL throttle (subprocess riêng)
+# 96GB RAM đủ để 48 workers mỗi worker load 1-2GB tick history
+```
+
+---
+
+### 📐 CẤU TRÚC FILE ĐỀ XUẤT
+
+```
+/home/xeon-sever/RabitScal/
+├── data_pipeline.py        ← Module này (Task 1.1)
+├── config/
+│   └── pipeline_config.json   ← MT5 credentials, symbols, candle counts
+└── logs/
+    └── system.log             ← Mọi event: connect, reconnect, validate, session
+```
+
+**`pipeline_config.json` dự kiến:**
+```json
+{
+  "symbol": "EURUSDc",
+  "timeframes": {
+    "H1":  { "mt5_tf": "TIMEFRAME_H1",  "candles": 200 },
+    "M15": { "mt5_tf": "TIMEFRAME_M15", "candles": 500 },
+    "M5":  { "mt5_tf": "TIMEFRAME_M5",  "candles": 1000 }
+  },
+  "heartbeat_interval_sec": 30,
+  "reconnect_max_attempts": 10,
+  "data_quality_min_score": 0.60,
+  "session_filters": {
+    "london_open_utc":  [7, 12],
+    "ny_open_utc":      [13, 17],
+    "asian_avoid_utc":  [21, 5]
+  }
+}
+```
+
+---
+
+### 📝 ĐỀ XUẤT CẢI TIẾN CHO KIẾN TRÚC NÀY
+
+#### Đề xuất 1: Shared Memory Buffer (cho tương lai scale-out)
+Thay vì `dict` in-memory thông thường, có thể dùng `multiprocessing.shared_memory` để chia sẻ numpy array trực tiếp giữa processes mà không serialize/deserialize — giảm latency từ ~5ms xuống ~0.1ms khi `ml_model.py` truy cập data.
+
+#### Đề xuất 2: Adaptive Fetch Interval
+Thay vì fetch cố định mỗi N giây, detect khi nào candle mới đóng (compare `rates[-1]["time"]` với lần fetch trước) và chỉ push update khi có candle mới — giảm MT5 API call không cần thiết trong giờ thanh khoản thấp.
+
+#### Đề xuất 3: Redis Cache Layer (nếu scale múltiple bots)
+Nếu tương lai cần chạy nhiều bot song song (nhiều cặp tiền), dùng Redis pub/sub để `DataPipeline` broadcast data một lần, nhiều consumers subscribe — tránh tình trạng 5 bots cùng gọi MT5 API tại cùng thời điểm.
+
+---
+
+### 🏁 KẾT LUẬN THIẾT KẾ TASK 1.1
+
+| Yêu cầu TechLead | Giải pháp thiết kế |
+|------------------|--------------------|
+| Không block Main Thread | ThreadPoolExecutor(3) + Daemon heartbeat thread riêng biệt |
+| Tận dụng 56 Threads Xeon | 4 threads giai đoạn này, 48+ cho ProcessPoolExecutor giai đoạn 4 |
+| mt5_reconnect() với exponential backoff | Sequence: 1s→2s→4s→8s→16s→32s→60s×4, max 10 attempt |
+| Session Filters | London(07-12 UTC) + NY(13-17 UTC), skip Asian + News window |
+| Data Validator | Quality Score 0-1, None/gap/OHLC/volume/count checks |
+| OOP Class structure | Class DataPipeline với public API rõ ràng, RLock thread-safe |
+| Hướng tới ProcessPoolExecutor | Data store numpy array, getter public, tách biệt executor pools |
+
+**Trạng thái:** ✅ Thiết kế hoàn chỉnh — **CHỜ LỆNH "PROCEED" từ TechLead để bắt đầu code `data_pipeline.py`**
+
+---
+
+*Báo cáo Task 1.1 được tạo bởi Antigravity — 2026-03-05 21:31 UTC+7 | Branch: task-1.1-data-pipeline*
