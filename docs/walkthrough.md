@@ -660,6 +660,14 @@ RabitScal/
 
 ---
 
-## 💻 Task 1.2: `execution.py` — Implementation (PENDING TechLead Review)
+## ✅ Task 1.2: `execution.py` — Implementation HOÀN TẤT (TechLead APPROVED)
 
-**Date:** 2026-03-05 22:11 UTC+7
+**Date:** 2026-03-05 22:27 UTC+7 | **Branch:** `task-1.2-execution` → merged `main`
+
+- `execution.py` hoàn chỉnh ~650 dòng: Class `OrderManager`, type hints, docstrings đầy đủ.
+- **FIX 1:** Thêm `magic_number=20250305` vào `MqlTradeRequest` — phân biệt lệnh bot vs tay.
+- **FIX 2:** `sl/tp` gắn trực tiếp vào `order_send()` (không dùng `ORDER_MODIFY` sau) — ngăn race condition SL/TP.
+- **FIX 3:** `_floor_lot()` làm tròn xuống theo `volume_step` bằng `round(..., 8)` — tránh `INVALID_VOLUME`.
+- Fill-or-Kill: retry ≤3 lần, mỗi lần fetch `bid/ask` realtime, tính lại `Entry/SL/TP` mới.
+- Spread Gate: kiểm tra `spread < MAX_SPREAD_PIPS` trước khi gửi lệnh.
+- Output: `data/trade_log.csv` (ticket, slippage_pips, spread, commission, reject_reason, attempts).
