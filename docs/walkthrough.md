@@ -702,3 +702,18 @@ RabitScal/
 - Entry = close Pinbar M5; SL = ngoài FVG boundary ± 2 pips buffer.
 
 *Phân tích kiến trúc chi tiết (tinh chỉnh Violated/Mitigated + TechLead Q&A 5 câu): `docs/walkthrough.md.resolved`*
+
+---
+
+## 🔄 Task 3.1: `main.py` + `main_config.json` — Implementation (PENDING TechLead snippet review)
+
+**Date:** 2026-03-05 23:48 UTC+7 | **Branch:** `task-3.1-main-orchestrator`
+
+- `main.py` ~400 dòng: Class `BotOrchestrator` OOP, 6-state machine (IDLE→SCANNING→SIGNAL_FOUND→PENDING_ORDER→IN_TRADE→CLOSING), graceful SIGTERM shutdown.
+- **Multi-symbol:** 7 cặp (`US100, US30, XAUUSD, USOIL, EURUSD, GBPUSD, USDJPY`); `StrategyEngine` một instance per symbol (FVG pool độc lập); `main_config.json` thay `"symbol"` → `"symbols"`.
+- **Global Lock Rule:** `open_trade is not None` → không scan symbol mới. 1 lệnh tối đa toàn account, enforce trong `_state_idle()`.
+- **Anti-spam API:** `last_scanned_time[symbol]` — mỗi symbol chỉ scan nếu `elapsed >= 300s` (1 nến M5). Tránh spam MT5 API khi tất cả symbols đang trong cooldown.
+- **IN_TRADE poll 0.5s** (`IN_TRADE_POLL_INTERVAL_SEC`); tất cả state khác 1s — bắt floating DD breach sớm hơn.
+- **Daily reset Server Time:** Đọc timestamp từ `mt5.symbol_info_tick()` + detect `_server_tz_offset` (UTC+2/+3 Exness) — không dùng UTC raw.
+- **Ghost Order:** Timeout 30s → `mt5.orders_get()` kiểm tra: có lệnh treo → CANCEL; có vị thế (confirm trễ) → IN_TRADE; không có gì → IDLE.
+- `risk_config.json` cập nhật: `daily_dd_limit 6%→15%`, `balance_floor 50%` (= system_max_dd 50%).

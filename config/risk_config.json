@@ -1,9 +1,17 @@
 {
-    "symbol": "EURUSDc",
+    "symbols": [
+        "US100",
+        "US30",
+        "XAUUSD",
+        "USOIL",
+        "EURUSD",
+        "GBPUSD",
+        "USDJPY"
+    ],
     "risk_per_trade_pct": 0.03,
     "atr_multiplier": 1.5,
     "safety_net": {
-        "daily_drawdown_limit_pct": 0.06,
+        "daily_drawdown_limit_pct": 0.15,
         "consecutive_loss_streak": 3,
         "cooldown_hours": 4,
         "min_balance_floor_pct": 0.50
