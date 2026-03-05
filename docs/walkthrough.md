@@ -719,3 +719,18 @@ RabitScal/
 - **Daily reset Server Time:** `mt5.symbol_info_tick()` timestamp + `_server_tz_offset` (UTC+2/+3 Exness).
 - **Ghost Order full flow:** Timeout 30s → poll position (fill muộn → IN_TRADE) → cancel lệnh treo → IDLE.
 - `risk_config.json`: `daily_dd_limit 6%→15%`, `balance_floor 50%`.
+
+---
+
+## ✅ Task 3.1: `main.py` State Machine Orchestrator — HOÀN TẤT (TechLead APPROVED)
+
+**Date:** 2026-03-06 00:23 UTC+7 | **Branch:** `task-3.1-main-orchestrator` → merged `main`
+
+- `main.py` **787 dòng** — `BotOrchestrator` v1.0 hoàn chỉnh, 6-state machine (IDLE→SCANNING→SIGNAL_FOUND→PENDING_ORDER→IN_TRADE→CLOSING).
+- **[HOTFIX v2] Candle Sync:** `mt5.copy_rates_from_pos(sym, M5, 0, 2)` → so sánh `rates[-2]["time"] > last_candle_time[sym]` — đồng bộ chính xác từng giây khi nến M5 vừa đóng, không bao giờ lệch pha hay re-scan cùng nến.
+- **[HOTFIX v2] None API Guard:** `if result is None: continue` trong vòng lặp ghost-order poll — mạng lag trả None không crash vòng chờ 30s.
+- **[HOTFIX v2] magic_number từ config:** Xóa hardcode, đọc từ `cfg["magic_number"]`, dùng thống nhất trong `OrderManager` call.
+- Multi-symbol 7 cặp, Global Lock Rule (max 1 lệnh), `IN_TRADE_POLL_INTERVAL_SEC=0.5s`, daily reset theo Exness server time.
+- Ghost Order full flow: timeout 30s → poll position (fill muộn → IN_TRADE) → cancel lệnh treo → IDLE.
+- SIGTERM handler + graceful shutdown qua `stop()`.
+
