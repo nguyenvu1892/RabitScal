@@ -753,3 +753,20 @@ RabitScal/
 - **CLI:** `python ml_model.py [--resume] [--trials N] [--workers N] [--fetch] [--log-level]`
 - Tạo `config/ml_config.json` (n_trials=500, n_workers=48, oos=24h, promote=0.95).
 
+
+---
+
+## 🔄 Task 5.2 — Backend `dashboard.py` Complete (PENDING TechLead snippet review)
+
+**Date:** 2026-03-06 01:23 UTC+7 | **Branch:** `task-5.2-dashboard`
+
+- `dashboard.py` **581 dòng** — FastAPI app, DashboardHub (WebSocket manager), DashboardPublisher (asyncio.Queue bridge), REST endpoints, uvicorn launcher.
+- **Architecture (Option B, 1 process):** uvicorn chạy trong daemon thread từ `main.py`. Communication qua `asyncio.Queue.put_nowait()` in-memory — zero blocking cho trading loop.
+- **DashboardPublisher:** `call_soon_threadsafe()` → `put_nowait()` — thread-safe bridge từ sync `main.py` sang async FastAPI event loop. Queue đầy → discard silently, bot không bao giờ bị block.
+- **DashboardHub:** WebSocket manager, auto-cleanup dead clients, gửi `snapshot` event ngay khi client mới connect.
+- **REST endpoints:** `GET /api/candles` (MT5 → Plotly format), `GET /api/trades` (trade_log.csv), `GET /api/status` (shared_state), `GET /api/health`.
+- **WS endpoint:** `/ws` — realtime event stream: state_change, candle_close, signal_found, order_filled, equity_update, trade_closed, safety_event.
+- **main.py patch:** Import dashboard với try/except fallback (`_NullPub`), `_start_dashboard()` daemon thread, `dashboard_pub.publish()` tại `_transition`, `_state_scanning`, `_state_pending_order`, `_state_in_trade`, `_state_closing`.
+- **Chart library:** Plotly.js (per TechLead directive) — FVG box dùng `shapes`, không cần hack.
+- **Bind:** `127.0.0.1:8888` — SSH tunnel để access từ ngoài.
+
