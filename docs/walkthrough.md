@@ -827,14 +827,18 @@ RabitScal/
 
 ---
 
-## 🔄 Task 6: `backtest_env.py` — Backtest Visualizer (PENDING review)
+## ✅ Task 6: `backtest_env.py` — Backtest Visualizer HOÀN TẤT
 
-**Date:** 2026-03-06 02:20 UTC+7 | **Branch:** `task-6-backtest-env`
+**Date:** 2026-03-06 02:28 UTC+7 | **Branch:** `task-6-backtest-env` → **merged main**
 
 - `backtest_env.py` ~530 dòng: Class `BacktestEnv` OOP, `BacktestReport` + `TradeRecord` dataclasses.
 - **`run(data, params)`:** OHLC worst-case simulation + Gaussian slippage model (`gauss(μ=avg_spread, σ=spread_std)`). Metrics: WR, PF, MaxDD, Sharpe, Calmar, avg_win/loss, avg_rrr.
 - **`export_trade_log()`:** CSV đầy đủ — 17 cột (trade_id, open/close_time, direction, entry/sl/tp/close_price, close_reason, pnl_raw, commission, slippage, pnl_net, cumulative_pnl, atr_at_entry, winrate_running, pf_running).
 - **`generate_html_report()`:** Plotly dark theme 3-row subplot: Row 1 = Equity Curve (line + markers color BUY/SELL); Row 2 = Drawdown % (area filled red + MaxDD annotation); Row 3 = PnL bar chart per trade (green/red). CDN inline, interactive zoom/pan.
+- **[BUGFIX]** `path` → `out_file` (biến Path object nhất quán với param `out_path`).
+- **[BUGFIX]** `winrate_running`: thay `t.trade_id + 1` bằng counter `trade_count` độc lập — tránh phụ thuộc vào giá trị trade_id khi dùng MT5 Ticket thực.
+- **[CONFIRMED]** `name="Equity"`, `name="Drawdown %"`, `name="PnL/Trade"` trong mọi trace — Legend hiển thị đúng.
 - CLI: `python backtest_env.py --params config/current_settings.json --out reports/`.
+
 
 

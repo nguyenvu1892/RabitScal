@@ -426,8 +426,8 @@ class BacktestEnv:
             ts       = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             out_path = str(DATA_DIR / f"trade_log_{ts}.csv")
 
-        path = Path(out_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        out_file = Path(out_path)
+        out_file.parent.mkdir(parents=True, exist_ok=True)
 
         fieldnames = [
             "trade_id", "open_time", "close_time",
@@ -441,20 +441,21 @@ class BacktestEnv:
         n_wins_running = 0
         gross_w        = 0.0
         gross_l        = 0.0
+        trade_count    = 0  # Counter độc lập, không phụ thuộc vào trade_id
 
-        with open(path, "w", newline="", encoding="utf-8") as f:
+        with open(out_file, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
 
             for t in report.trades:
+                trade_count += 1
                 if t.pnl_net > 0:
                     n_wins_running += 1
                     gross_w        += t.pnl_net
                 else:
                     gross_l        += abs(t.pnl_net)
 
-                idx = t.trade_id + 1  # 1-indexed
-                wr_run = n_wins_running / idx
+                wr_run = n_wins_running / trade_count   # trade_count luôn ≥ 1
                 pf_run = gross_w / (gross_l + 1e-8)
 
                 writer.writerow({
@@ -479,9 +480,9 @@ class BacktestEnv:
 
         logger.info(
             f"[BacktestEnv] Trade log exported | "
-            f"{len(report.trades)} trades | {path}"
+            f"{len(report.trades)} trades | {out_file}"
         )
-        return path
+        return out_file
 
     def generate_html_report(
         self,
@@ -516,12 +517,12 @@ class BacktestEnv:
             ts       = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             out_path = str(REPORTS_DIR / f"backtest_report_{ts}.html")
 
-        path = Path(out_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        out_file = Path(out_path)
+        out_file.parent.mkdir(parents=True, exist_ok=True)
 
         if not report.trades:
             logger.warning("[BacktestEnv] No trades to chart — skipping HTML report")
-            return path
+            return out_file
 
         # ── Prepare series ───────────────────────────────────────────────────
         trade_ids  = [t.trade_id    for t in report.trades]
@@ -665,7 +666,7 @@ class BacktestEnv:
 
         # ── Write HTML ───────────────────────────────────────────────────────
         fig.write_html(
-            str(path),
+            str(out_file),
             full_html=True,
             include_plotlyjs="cdn",      # Dùng CDN — file nhỏ hơn, không cần offline
             config={
@@ -677,9 +678,9 @@ class BacktestEnv:
 
         logger.info(
             f"[BacktestEnv] HTML report generated | "
-            f"{report.trade_count} trades | {path}"
+            f"{report.trade_count} trades | {out_file}"
         )
-        return path
+        return out_file
 
 
 # ---------------------------------------------------------------------------
