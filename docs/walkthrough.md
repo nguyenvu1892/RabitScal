@@ -734,3 +734,22 @@ RabitScal/
 - Ghost Order full flow: timeout 30s → poll position (fill muộn → IN_TRADE) → cancel lệnh treo → IDLE.
 - SIGTERM handler + graceful shutdown qua `stop()`.
 
+
+---
+
+## 🔄 Task 4.1: `ml_model.py` — Implementation (PENDING TechLead snippet review)
+
+**Date:** 2026-03-06 00:43 UTC+7 | **Branch:** `task-4.1-ml-optimization`
+
+- `ml_model.py` **1045 dòng** — Class `OptimizationEngine` OOP + `run_backtest_fast()` + `_shadow_deploy()` + CLI argparse.
+- **Data fetch:** `mt5.copy_rates_range()` → `data/m5_historical.npy` (load 1 lần, cache, tránh disconnect bot live).
+- **Shared Memory zero-copy:** `SharedNumpyArray` context manager — 1 numpy array 500MB → 48 worker processes đọc cùng, tiết kiệm 47× RAM; worker attach qua tên shm, không pickle.
+- **ProcessPoolExecutor(max_workers=48):** 48 workers × 1 OS process = bypass GIL hoàn toàn. Thread 1 = Bot, Thread 2-5 = DataPipeline, Thread 6 = ML Orchestrator, Thread 7-55 = 48 Optuna Workers.
+- **Optuna TPESampler + MedianPruner:** 500 trials, 9D search space (ATR×3, VSA×3, Pinbar×2, Gate×1). SQLite backend (`data/optuna_study.db`) → resume nếu crash.
+- **Hàm Objective:** `WR^0.60 × PF^0.40 × dd_penalty` — TrialPruned ngay khi DD ≥ 15% hoặc trade_count < 200.
+- **`run_backtest_fast()`:** Vectorized numpy: ATR(14) cumsum, Volume MA20 convolve, Pinbar mask, VSA 2-layer mask, FVG 3-candle vectorized, OHLC worst-case simulation. Ước tính ~25ms/trial.
+- **`_shadow_deploy()` Walk-Forward OOS:** Sau khi Optuna hoàn tất, validate best_params trên 24h OOS data chưa thấy. `shadow_pf ≥ active_pf × 0.95` → **PROMOTE** vào `current_settings.json` (FileLock). Ngược lại → **RETIRE**.
+- **Shadow versioning:** `config/versions/settings_v{NNN}.json` lưu đầy đủ: train_metrics, oos_metrics, status (promoted/retired), created_at.
+- **CLI:** `python ml_model.py [--resume] [--trials N] [--workers N] [--fetch] [--log-level]`
+- Tạo `config/ml_config.json` (n_trials=500, n_workers=48, oos=24h, promote=0.95).
+
