@@ -507,6 +507,208 @@ def _build_objective(
 
 
 # ---------------------------------------------------------------------------
+# Top-Level Public API — objective(trial) & run_optimization()
+# Task 4.2: Các hàm entry point rõ ràng để kickstart ML training loop
+# ---------------------------------------------------------------------------
+
+# Module-level context: được set bởi run_optimization() trước khi study chạy
+# Dùng pattern này thay vì closure để top-level function có thể được pickle
+# (cần thiết khi Optuna gọi objective trong subprocess)
+_OPT_CONTEXT: dict = {}
+
+
+def objective(trial: optuna.Trial) -> float:
+    """
+    Hàm Objective chuẩn Optuna — top-level, picklable, dùng trực tiếp với study.optimize().
+
+    Khai báo toàn bộ không gian tham số (9 chiều) cho chiến lược SMC+VSA:
+        ─ ATR group    : atr_sl_multiplier, atr_lot_multiplier, atr_fvg_buffer
+        ─ VSA group    : vsa_volume_ratio, vsa_neighbor_ratio, vsa_min_score
+        ─ Pinbar group : pinbar_wick_ratio, pinbar_body_ratio
+        ─ Gate         : composite_score_gate
+
+    Score = WR^0.60 × PF^0.40 × dd_penalty
+        • dd_penalty = 1 − (max_dd / max_dd_limit)²
+        • TrialPruned ngay khi DD ≥ 15% hoặc trade_count < min_trades
+
+    Context phải được set trước (bởi run_optimization):
+        _OPT_CONTEXT = {
+            "data":          np.ndarray,   # Full M5 OHLCV
+            "max_dd_limit":  float,        # e.g. 0.15
+            "min_trades":    int,          # e.g. 200
+        }
+    """
+    ctx          = _OPT_CONTEXT
+    data         = ctx["data"]
+    max_dd_limit = ctx.get("max_dd_limit", DEFAULT_MAX_DD_LIMIT)
+    min_trades   = ctx.get("min_trades",   DEFAULT_MIN_TRADES)
+
+    # ── Suggest tham số (9 chiều) ──────────────────────────────────────────
+    params = {
+        # ATR group — kiểm soát khoảng cách SL và kích thước FVG tối thiểu
+        "atr_sl_multiplier":    trial.suggest_float("atr_sl_multiplier",    0.8,  3.0),
+        "atr_lot_multiplier":   trial.suggest_float("atr_lot_multiplier",   0.005, 0.05),
+        "atr_fvg_buffer":       trial.suggest_float("atr_fvg_buffer",       0.3,  1.5),
+
+        # VSA group — ngưỡng lọc volume climax (2-layer filter)
+        "vsa_volume_ratio":     trial.suggest_float("vsa_volume_ratio",     1.2,  3.0),
+        "vsa_neighbor_ratio":   trial.suggest_float("vsa_neighbor_ratio",   1.1,  2.0),
+        "vsa_min_score":        trial.suggest_float("vsa_min_score",        0.3,  0.6),
+
+        # Pinbar group — tỷ lệ wick/body xác nhận đảo chiều
+        "pinbar_wick_ratio":    trial.suggest_float("pinbar_wick_ratio",    0.50, 0.75),
+        "pinbar_body_ratio":    trial.suggest_float("pinbar_body_ratio",    0.10, 0.40),
+
+        # Composite gate — ngưỡng tổng hợp để ra signal (SMC+VSA+Pinbar)
+        "composite_score_gate": trial.suggest_float("composite_score_gate", 0.45, 0.75),
+    }
+
+    # ── Chạy backtest vectorized ────────────────────────────────────────────
+    try:
+        result = run_backtest_fast(data, params)
+    except optuna.exceptions.TrialPruned:
+        raise
+
+    # ── Hard prune nếu không đủ điều kiện ──────────────────────────────────
+    if result.max_drawdown >= max_dd_limit or result.trade_count < min_trades:
+        raise optuna.exceptions.TrialPruned()
+
+    # ── Score tổng hợp: WR^0.60 × PF^0.40 × dd_penalty ───────────────────
+    dd_penalty      = 1.0 - (result.max_drawdown / max_dd_limit) ** 2
+    composite_score = (
+        (result.winrate       ** WR_WEIGHT) *
+        (result.profit_factor ** PF_WEIGHT) *
+        max(dd_penalty, 0.0)
+    )
+
+    logger.debug(
+        f"[Trial {trial.number}] "
+        f"WR={result.winrate:.3f} PF={result.profit_factor:.3f} "
+        f"DD={result.max_drawdown:.3f} trades={result.trade_count} "
+        f"score={composite_score:.4f}"
+    )
+
+    return composite_score
+
+
+def run_optimization(
+    data:         np.ndarray,
+    *,
+    n_trials:     int   = DEFAULT_N_TRIALS,
+    n_workers:    int   = DEFAULT_N_WORKERS,
+    max_dd_limit: float = DEFAULT_MAX_DD_LIMIT,
+    min_trades:   int   = DEFAULT_MIN_TRADES,
+    resume:       bool  = False,
+) -> optuna.Study:
+    """
+    Entry point standalone để khởi chạy ML training loop.
+
+    Khởi tạo Optuna study với SQLite backend (hỗ trợ resume khi crash),
+    kích hoạt ProcessPoolExecutor(max_workers=48) để tận dụng tối đa
+    56 luồng Xeon E5-2680 v4 (48 workers ML + 8 luồng dự trữ cho bot).
+
+    Execution model:
+        • ProcessPoolExecutor(max_workers=n_workers) → bypass GIL hoàn toàn
+        • Mỗi trial = 1 subprocess → backtest vectorized numpy ~25ms/trial
+        • SQLite storage → có thể Ctrl+C và resume bằng --resume flag
+        • TPESampler + MedianPruner → Bayesian search thông minh
+
+    Args:
+        data:         np.ndarray shape (N, 6) — M5 OHLCV data
+        n_trials:     Số Optuna trials (default: 500)
+        n_workers:    Số CPU workers ProcessPoolExecutor (default: 48)
+        max_dd_limit: Max drawdown cho phép để không prune trial (default: 0.15)
+        min_trades:   Số lệnh tối thiểu để trial hợp lệ (default: 200)
+        resume:       True → load study cũ từ SQLite; False → tạo mới
+
+    Returns:
+        optuna.Study đã optimize xong — .best_trial, .best_params sẵn sàng
+    """
+    global _OPT_CONTEXT
+
+    # ── Set module-level context (tránh closure — giữ objective picklable) ─
+    _OPT_CONTEXT = {
+        "data":          data,
+        "max_dd_limit":  max_dd_limit,
+        "min_trades":    min_trades,
+    }
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    storage_url = f"sqlite:///{STUDY_DB_PATH}"
+    sampler     = optuna.samplers.TPESampler(seed=42, n_startup_trials=20)
+    pruner      = optuna.pruners.MedianPruner(n_startup_trials=20, n_warmup_steps=0)
+
+    # ── Khởi tạo / Resume Optuna Study ─────────────────────────────────────
+    if resume:
+        logger.info(f"[run_optimization] Resuming study from: {storage_url}")
+        study = optuna.load_study(
+            study_name=STUDY_NAME,
+            storage=storage_url,
+            sampler=sampler,
+        )
+    else:
+        study = optuna.create_study(
+            study_name=STUDY_NAME,
+            direction="maximize",            # Maximize composite score
+            storage=storage_url,             # SQLite → durable, resumable
+            sampler=sampler,                 # TPE Bayesian sampler
+            pruner=pruner,                   # Median pruner cắt early bad trials
+            load_if_exists=True,             # Resume nếu DB đã tồn tại
+        )
+
+    n_done      = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
+    n_remaining = max(0, n_trials - n_done)
+
+    logger.info(
+        f"[run_optimization] Study ready | "
+        f"done={n_done} remaining={n_remaining} "
+        f"workers={n_workers} storage={storage_url}"
+    )
+
+    if n_remaining == 0:
+        logger.info("[run_optimization] All trials already complete — skipping optimize")
+        return study
+
+    # ── KÍCH HOẠT 48 LUỒNG ProcessPoolExecutor ─────────────────────────────
+    # Mỗi worker = 1 OS process riêng biệt → bypass GIL hoàn toàn
+    # Dual Xeon E5-2680 v4: 56 logical threads → dùng 48 cho ML, 8 dự trữ bot
+    logger.info(
+        f"[run_optimization] Launching ProcessPoolExecutor | "
+        f"max_workers={n_workers} | n_trials={n_remaining}"
+    )
+
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        # Truyền executor vào _build_objective để mỗi trial của Optuna
+        # được submit sang 1 worker process riêng → parallel hoàn toàn
+        obj_fn = _build_objective(
+            shm_name=None,       # Không dùng shared_memory ở mode standalone
+            data_shape=data.shape,
+            data_dtype=str(data.dtype),
+            max_dd_limit=max_dd_limit,
+            min_trades=min_trades,
+            executor=executor,
+        )
+
+        # study.optimize() điều phối Bayesian search qua executor
+        study.optimize(
+            obj_fn,
+            n_trials=n_remaining,
+            n_jobs=1,               # Optuna gọi objective tuần tự; executor batches workers
+            show_progress_bar=True,
+            gc_after_trial=True,
+        )
+
+    logger.info(
+        f"[run_optimization] Complete | "
+        f"best_score={study.best_value:.4f} | "
+        f"best_params={study.best_params}"
+    )
+
+    return study
+
+
+# ---------------------------------------------------------------------------
 # Data Fetcher — MT5 → numpy cache
 # ---------------------------------------------------------------------------
 
