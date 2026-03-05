@@ -1,0 +1,15 @@
+{
+    "_comment": "RabitScal — ml_model.py OptimizationEngine config",
+    "n_trials": 500,
+    "n_workers": 48,
+    "min_trades": 200,
+    "max_dd_limit": 0.15,
+    "data_lookback_days": 180,
+    "shadow_deploy_hours": 24,
+    "promote_threshold": 0.95,
+    "retire_threshold": 0.80,
+    "study_storage": "sqlite:///data/optuna_study.db",
+    "data_cache_path": "data/m5_historical.npy",
+    "commission_per_lot": 3.5,
+    "rr_ratio": 1.5
+}
