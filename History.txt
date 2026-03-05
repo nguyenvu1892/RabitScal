@@ -1,0 +1,3 @@
+[[PHASE 0]] Khởi tạo dự án và chốt Master Plan - Lý do: Thiết lập móng vững chắc và thống nhất lộ trình triển khai hệ thống Rabit_Exness AI.
+Date: 2026-03-05 | Branch: task-0-init-plan
+Action: Phân tích phản biện Master Plan 5 giai đoạn, ghi nhận các rủi ro tiềm ẩn (bottleneck hiệu năng, slippage Exness Cent, loop ML race condition, thiếu circuit breaker), đề xuất bổ sung Safety Net Layer và State Machine. Tạo docs/walkthrough.md và Plan.md.
