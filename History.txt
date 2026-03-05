@@ -10,3 +10,11 @@ Action: Code data_pipeline.py (Class DataPipeline, ThreadPoolExecutor(3), Daemon
 Date: 2026-03-05 | Branch: task-1.2-execution
 Action: Phân tích yêu cầu execution.py từ Plan.md v1.1. Thiết kế Class OrderManager với Fill-or-Kill (max 3 retry, tính lại Entry/SL/TP mỗi retry), kiểm tra Spread realtime, Slippage model, log từ chối lệnh (REQUOTE/TIMEOUT/SPREAD_TOO_HIGH). PENDING: chờ TechLead review thiết kế trước khi code.
 
+[[PHASE 1][Task 1.2]] Build Execution Layer — DONE (TechLead APPROVED)
+Date: 2026-03-05 | Branch: task-1.2-execution → merged main
+Action: Code execution.py (~650 dòng): Class OrderManager, Fill-or-Kill 3 retry, Spread Gate, FIX 1 magic_number, FIX 2 sl/tp inline order_send(), FIX 3 _floor_lot() round(8). Output: data/trade_log.csv. Merged → main → push origin.
+
+[[PHASE 1][Task 1.3]] Design Risk Manager — PENDING TechLead APPROVAL
+Date: 2026-03-05 | Branch: task-1.3-risk-manager
+Action: Thiết kế kiến trúc risk_manager.py: Class RiskManager OOP — 2 Layer (Position Sizing ATR + Balance, Safety Net Circuit Breaker). 3 ngưỡng cầu dao: daily_dd 6% (PAUSED), streak 3 (COOLDOWN 4h), balance floor 50% (HALTED). Tính pip_value theo MT5 API (Exness Cent). Đang chờ TechLead duyệt thiết kế.
+
