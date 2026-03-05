@@ -674,15 +674,15 @@ RabitScal/
 
 ---
 
-## 🔄 Task 1.3: `risk_manager.py` — Implementation (PENDING TechLead snippet review)
+## ✅ Task 1.3: `risk_manager.py` — Implementation HOÀN TẤT (TechLead APPROVED)
 
-**Date:** 2026-03-05 22:38 UTC+7 | **Branch:** `task-1.3-risk-manager`
+**Date:** 2026-03-05 22:55 UTC+7 | **Branch:** `task-1.3-risk-manager` → merged `main`
 
-- `risk_manager.py` ~400 dòng: Class `RiskManager` OOP, type hints, docstrings, `RLock` thread-safe.
-- **Position Sizing:** `calculate_lot_size()` — rủi ro 3%/lệnh, `pip_value_per_lot` qua MT5 API (không hardcode).
-- **CRITICAL ADD (TechLead):** `check_floating_drawdown(equity)` — gọi ***liên tục*** từ main loop. Equity < daily_start × (1−6%) → PAUSED ngay + signal Market Close All. Hàng rào trước cả SL.
-- **Safety Net 3 lớp:** `_trigger_cooldown()` (4h/streak≥3) / `_trigger_pause()` (đến 00:00 UTC/daily DD) / `_trigger_halt()` (balance ≤ 50% init).
-- **initial_balance persistence:** Lần đầu fetch `mt5.account_info().balance`, lưu `config/state.json`. Restart bot đọc file — tránh reset mốc khi crash lúc lỗ.
-- **Hot-reload unhalt:** Bot reload `risk_config.json` mỗi ~10s. Admin sửa `unhalt_timestamp` → HALTED → ACTIVE trong ≤10s, không restart.
-- `atr_multiplier`: Đọc từ `risk_config.json` (default 1.5, hoàn toàn configurable).
-- Hard Rule: Max 1 lệnh đang mở — enforce tại `main.py` State Machine, không trong `RiskManager`.
+- `risk_manager.py` 686 dòng: Class `RiskManager` OOP, type hints, docstrings đầy đủ, `RLock` thread-safe.
+- **Position Sizing:** `calculate_lot_size()` + `calculate_sl_distance()` — rủi ro 3%/lệnh, `pip_value_per_lot` qua MT5 API (không hardcode Exness Cent formula).
+- **[APPROVED] `check_floating_drawdown(equity)`** — gọi ***liên tục*** từ main loop khi có lệnh mở. Equity < daily_start × (1−6%) → PAUSED ngay + signal Market Close All. Hàng rào TRƯỚC SL.
+- **[APPROVED] Early Warning 80%:** Log WARNING khi floating DD ≥ 80% ngưỡng (4.8% của 6%) — cảnh báo sớm trước khi kích hoạt PAUSE.
+- **Safety Net 3 lớp:** `_trigger_cooldown()` (4h/streak≥3) / `_trigger_pause()` (đến 00:00 UTC ngày sau) / `_trigger_halt()` (balance ≤ 50% init).
+- **initial_balance persistence:** `config/state.json` lưu mốc bền vững; try/except bảo vệ JSON parse lỗi — không crash khi file corrupt.
+- **Hot-reload unhalt:** Bot reload `risk_config.json` mỗi 10s; admin sửa `unhalt_timestamp` → HALTED → ACTIVE trong ≤10s, không cần restart.
+- `validate_trade()`: 4 checks liên tiếp (bot ACTIVE / lot min / lot max / risk ≤ 3%). Hard Rule max 1 lệnh delegated sang `main.py` State Machine.
