@@ -686,3 +686,19 @@ RabitScal/
 - **initial_balance persistence:** `config/state.json` lưu mốc bền vững; try/except bảo vệ JSON parse lỗi — không crash khi file corrupt.
 - **Hot-reload unhalt:** Bot reload `risk_config.json` mỗi 10s; admin sửa `unhalt_timestamp` → HALTED → ACTIVE trong ≤10s, không cần restart.
 - `validate_trade()`: 4 checks liên tiếp (bot ACTIVE / lot min / lot max / risk ≤ 3%). Hard Rule max 1 lệnh delegated sang `main.py` State Machine.
+
+---
+
+## ✅ Task 2.1: `strategy_engine.py` — Implementation HOÀN TẤT (TechLead APPROVED)
+
+**Date:** 2026-03-05 23:18 UTC+7 | **Branch:** `task-2.1-strategy-engine` → merged `main`
+
+- `strategy_engine.py` ~550 dòng: Class `StrategyEngine` OOP, type hints, docstrings đầy đủ. 5 vũ khí SMC+VSA trên H1/M15/M5.
+- **Anti-Repainting tuyệt đối:** `h1[:-1]`, `m15[:-1]`, `m5[-2]`, `m5[-51:-1]` — không một dòng nào dùng `data[-1]` để tính signal.
+- **[APPROVED] FVG Pool (Violated vs Mitigated):** Phân biệt 2 lý do xóa FVG: (1) *Violated* = close xuyên boundary → cấu trúc gãy; (2) *Mitigated* = đã trigger signal → tránh double entry. TTL=48 nến M15, max_size=20 (FIFO).
+- **[APPROVED] Pinbar Validation:** wick_ratio ≥ 60%, body_ratio ≤ 35%. BẮt buộc wick phải chạm FVG (low ≤ fvg.top cho BUY, high ≥ fvg.bottom cho SELL).
+- **[APPROVED] VSA 2-Layer Filter:** Layer 1 = vol ≥ session_mean × 1.5x (baseline riêng London/NY/Global); Layer 2 = vol > prev_candle.vol × 1.2x (để Climax nổi bật so với nến liền kề).
+- **Composite Score:** 40%×pinbar + 35%×vsa + 25%×structure(BOS=1.0/CHoCH=0.7). Gate ≥ 0.55 mới ra signal.
+- Entry = close Pinbar M5; SL = ngoài FVG boundary ± 2 pips buffer.
+
+*Phân tích kiến trúc chi tiết (tinh chỉnh Violated/Mitigated + TechLead Q&A 5 câu): `docs/walkthrough.md.resolved`*
