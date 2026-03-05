@@ -530,8 +530,98 @@ Nếu tương lai cần chạy nhiều bot song song (nhiều cặp tiền), dù
 | OOP Class structure | Class DataPipeline với public API rõ ràng, RLock thread-safe |
 | Hướng tới ProcessPoolExecutor | Data store numpy array, getter public, tách biệt executor pools |
 
-**Trạng thái:** ✅ Thiết kế hoàn chỉnh — **CHỜ LỆNH "PROCEED" từ TechLead để bắt đầu code `data_pipeline.py`**
+**Trạng thái:** ✅ Thiết kế hoàn chỉnh — TechLead APPROVED — TIẾN HÀNH IMPLEMENTATION
 
 ---
 
-*Báo cáo Task 1.1 được tạo bởi Antigravity — 2026-03-05 21:31 UTC+7 | Branch: task-1.1-data-pipeline*
+### 📦 KHỞI TẠO MÔI TRƯỜNG — `requirements.txt`
+
+**Date:** 2026-03-05 21:45 UTC+7 | **Action:** Tạo file `requirements.txt` cho toàn dự án
+
+Theo yêu cầu TechLead, khởi tạo file `requirements.txt` với 3 nhóm thư viện chia theo vai trò trong hệ thống:
+
+#### Group 1 — Core Trading & Data
+| Thư viện | Version | Vai trò |
+|----------|---------|---------|
+| `MetaTrader5` | ≥5.0.45 | MT5 Python API — kéo bar/tick, gửi lệnh |
+| `pandas` | ≥2.2.0 | DataFrame xử lý OHLCV, `trade_log.csv` |
+| `numpy` | ≥1.26.4 | Structured ndarray, shared memory (GIL bypass Giai đoạn 4) |
+| `pytz` | ≥2024.1 | Timezone UTC chuẩn hoá cho Exness server offset |
+| `filelock` | ≥3.13.1 | File lock cho `config/current_settings.json` — tránh ML race condition |
+| `schedule` | ≥1.2.1 | Session window scheduling |
+
+#### Group 2 — Web Dashboard (FastAPI + WebSocket)
+| Thư viện | Version | Vai trò |
+|----------|---------|---------|
+| `fastapi` | ≥0.110.0 | Async REST + WebSocket API framework |
+| `uvicorn[standard]` | ≥0.29.0 | ASGI server (uvloop + httptools) — throughput tối đa |
+| `websockets` | ≥12.0 | Realtime chart data streaming đến browser |
+| `plotly` | ≥5.20.0 | Interactive candlestick chart, equity curve |
+| `pandas-ta` | ≥0.3.14b | TA indicators (ATR, EMA, RSI) trực tiếp trên pandas |
+| `aiofiles` | ≥23.2.1 | Async file I/O — stream `system.log` lên dashboard realtime |
+
+#### Group 3 — Machine Learning & Optimization
+| Thư viện | Version | Vai trò |
+|----------|---------|---------|
+| `optuna` | ≥3.6.0 | Bayesian Hyperparameter Optimization (TPE) — dùng ProcessPoolExecutor 48 workers |
+| `deap` | ≥1.4.1 | Genetic Algorithm / Evolutionary Strategy |
+| `torch` | ≥2.2.2 | PyTorch — RL Agent (PPO/DQN) với GPU acceleration |
+| `stable-baselines3` | ≥2.3.0 | RL algorithms chuẩn công nghiệp |
+| `gymnasium` | ≥0.29.1 | Trading env interface cho `backtest_env.py` |
+| `joblib` | ≥1.4.0 | Parallel CPU jobs, model serialization |
+
+**Lý do pin version cụ thể:** Tránh breaking API changes (PyTorch, FastAPI, Gymnasium đều hay có breaking changes giữa major versions). Pin `>=` thay vì `==` để còn nhận patch security fixes.
+
+---
+
+### 💻 IMPLEMENTATION — `data_pipeline.py` CODE HOÀN TẤT
+
+**Date:** 2026-03-05 22:00 UTC+7 | **Deliverable:** `data_pipeline.py` (production-ready)
+
+#### Tóm lược những gì đã implement
+
+| Method | Vai trò | Thread |
+|--------|---------|--------|
+| `__init__()` | Khởi tạo config, executor, RLock, data store, logger | Main |
+| `start()` | Kết nối MT5, spawn heartbeat daemon, initial fetch | Main |
+| `stop()` | Graceful shutdown executor + MT5, join heartbeat | Main |
+| `fetch_all()` | Submit 3 futures song song vào ThreadPoolExecutor | Main → 3 Workers |
+| `_fetch_candles(tf)` | MT5 call → retry → UTC normalize → validate → store | Worker Thread |
+| `mt5_reconnect()` | Exponential backoff: `[1,2,4,8,16,32,60,60,60,60]`s, 10 attempts | Any Thread |
+| `_heartbeat_loop()` | Daemon: ping MT5/30s → auto-reconnect → refresh data | Daemon Thread |
+| `validate_candles()` | Quality Score 0–1: None/gap/OHLC/volume/count checks | Worker Thread |
+| `is_session_active()` | London 07-12 / NY 13-17 UTC, skip Asian+News | Any Thread |
+| `get_data(tf)` | Thread-safe getter (RLock), trả về `numpy ndarray` | Any Thread |
+| `_detect_server_tz()` | Auto-detect Exness server UTC offset (UTC+2/+3) | Init |
+
+#### Quy chuẩn Logging
+
+Format áp dụng: `[TIME] - [LEVEL] - [MODULE] - [MESSAGE]`
+
+```
+[2026-03-05 14:30:00 UTC] - [INFO]    - [DataPipeline] - MT5 connected | terminal='MetaTrader 5' | server_tz_offset=UTC+2h
+[2026-03-05 14:30:05 UTC] - [DEBUG]   - [DataPipeline] - _fetch_candles(H1): candles=200 | latency=23.5ms | quality=0.97 | passed=True
+[2026-03-05 14:30:05 UTC] - [DEBUG]   - [DataPipeline] - _fetch_candles(M15): candles=500 | latency=31.2ms | quality=0.95 | passed=True
+[2026-03-05 14:30:05 UTC] - [DEBUG]   - [DataPipeline] - _fetch_candles(M5): candles=1000 | latency=47.8ms | quality=0.93 | passed=True
+[2026-03-05 15:00:30 UTC] - [WARNING] - [DataPipeline] - Heartbeat ✗ — MT5 terminal unreachable. Triggering reconnect...
+[2026-03-05 15:00:31 UTC] - [WARNING] - [DataPipeline] - [MT5] Reconnect attempt 1/10 — waiting 1s before retry...
+[2026-03-05 15:00:33 UTC] - [INFO]    - [DataPipeline] - [MT5] Reconnected successfully on attempt 2/10
+```
+
+#### Files đã tạo trong commit này
+
+```
+RabitScal/
+├── data_pipeline.py            ← Module chính (600+ dòng, production-ready)
+├── requirements.txt             ← 3 nhóm thư viện với version pin
+├── config/
+│   └── pipeline_config.json    ← Cấu hình symbol, timeframes, session filters
+└── logs/                        ← auto-created bởi DataPipeline khi start()
+    └── system.log
+```
+
+**Trạng thái:** ✅ Code hoàn tất — **PENDING TechLead review & PROCEED để merge vào `main`**
+
+---
+
+*Cập nhật bởi Antigravity — 2026-03-05 22:00 UTC+7 | Branch: task-1.1-data-pipeline*

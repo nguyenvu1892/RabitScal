@@ -1,0 +1,49 @@
+# ============================================================
+# requirements.txt — Rabit_Exness AI
+# Server: Dual Xeon E5-2680 v4 (56 Threads) / 96GB RAM / NVIDIA GPU
+# Python: 3.10+
+# Last updated: 2026-03-05
+# ============================================================
+
+# ────────────────────────────────────────────────────────────
+# GROUP 1: CORE TRADING & DATA
+# Kéo dữ liệu MT5, xử lý số liệu, timezone, cấu hình
+# ────────────────────────────────────────────────────────────
+MetaTrader5>=5.0.45           # MT5 Python API — kéo bar/tick, gửi lệnh
+pandas>=2.2.0                 # DataFrame xử lý OHLCV, trade_log.csv
+numpy>=1.26.4                 # Structured ndarray, shared memory (GIL bypass)
+pytz>=2024.1                  # Timezone chuẩn hoá UTC cho MT5 server offset
+python-dateutil>=2.9.0        # Parse datetime linh hoạt
+filelock>=3.13.1              # File lock cho config/current_settings.json (ML safe)
+schedule>=1.2.1               # Lightweight job scheduler (session window checks)
+
+# ────────────────────────────────────────────────────────────
+# GROUP 2: WEB DASHBOARD (FUTURE-PROOF)
+# Realtime WebSocket dashboard — TradingView-style + PnL monitor
+# Async-first stack: FastAPI + Uvicorn + WebSockets + Charting
+# ────────────────────────────────────────────────────────────
+fastapi>=0.110.0              # Async REST + WebSocket API framework
+uvicorn[standard]>=0.29.0     # ASGI server (uvloop + httptools for max throughput)
+websockets>=12.0              # WebSocket server/client — realtime chart streaming
+starlette>=0.37.2             # ASGI toolkit (used by FastAPI internally)
+pydantic>=2.6.4               # Data validation & settings management
+httpx>=0.27.0                 # Async HTTP client (internal API calls)
+plotly>=5.20.0                # Interactive financial charts (candlestick, equity curve)
+pandas-ta>=0.3.14b            # Technical Analysis indicators (ATR, EMA, RSI) on pandas
+aiofiles>=23.2.1              # Async file I/O for log streaming to dashboard
+
+# ────────────────────────────────────────────────────────────
+# GROUP 3: MACHINE LEARNING & OPTIMIZATION
+# Giai đoạn 4: Bayesian Optimization, Genetic Algorithms,
+# Reinforcement Learning — khai thác full 56 cores Xeon
+# ────────────────────────────────────────────────────────────
+scikit-learn>=1.4.1           # Preprocessing, cross-validation, baseline models
+scipy>=1.13.0                 # Optimization primitives, stats distributions
+optuna>=3.6.0                 # Bayesian Hyperparameter Optimization (TPE sampler)
+                               #   → ProcessPoolExecutor(48 workers) parallelism
+deap>=1.4.1                   # DEAP — Genetic Algorithm / Evolutionary Strategy
+torch>=2.2.2                  # PyTorch — Reinforcement Learning (PPO/DQN Agent)
+                               #   → GPU acceleration via NVIDIA card
+stable-baselines3>=2.3.0      # RL algorithms (PPO, A2C, SAC) built on PyTorch
+gymnasium>=0.29.1             # OpenAI Gym API — trading env interface (backtest_env.py)
+joblib>=1.4.0                 # Parallel CPU jobs, model persistence (.pkl serialization)

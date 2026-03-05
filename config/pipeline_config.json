@@ -1,0 +1,40 @@
+{
+    "symbol": "EURUSDc",
+    "timeframes": {
+        "H1": {
+            "mt5_tf": "TIMEFRAME_H1",
+            "candles": 200
+        },
+        "M15": {
+            "mt5_tf": "TIMEFRAME_M15",
+            "candles": 500
+        },
+        "M5": {
+            "mt5_tf": "TIMEFRAME_M5",
+            "candles": 1000
+        }
+    },
+    "heartbeat_interval_sec": 30,
+    "reconnect_max_attempts": 10,
+    "data_quality_min_score": 0.60,
+    "server_tz_offset_hours": 2,
+    "log_dir": "logs",
+    "mt5_login": null,
+    "mt5_password": null,
+    "mt5_server": null,
+    "session_filters": {
+        "london_open_utc": [
+            7,
+            12
+        ],
+        "ny_open_utc": [
+            13,
+            17
+        ],
+        "asian_avoid_utc": [
+            21,
+            5
+        ],
+        "news_buffer_minutes": 15
+    }
+}
