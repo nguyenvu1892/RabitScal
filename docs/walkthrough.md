@@ -705,15 +705,17 @@ RabitScal/
 
 ---
 
-## 🔄 Task 3.1: `main.py` + `main_config.json` — Implementation (PENDING TechLead snippet review)
+## 🔄 Task 3.1: `main.py` + `main_config.json` — Implementation (PENDING TechLead snippet review v2)
 
-**Date:** 2026-03-05 23:48 UTC+7 | **Branch:** `task-3.1-main-orchestrator`
+**Date:** 2026-03-05 23:57 UTC+7 | **Branch:** `task-3.1-main-orchestrator`
 
 - `main.py` ~400 dòng: Class `BotOrchestrator` OOP, 6-state machine (IDLE→SCANNING→SIGNAL_FOUND→PENDING_ORDER→IN_TRADE→CLOSING), graceful SIGTERM shutdown.
 - **Multi-symbol:** 7 cặp (`US100, US30, XAUUSD, USOIL, EURUSD, GBPUSD, USDJPY`); `StrategyEngine` một instance per symbol (FVG pool độc lập); `main_config.json` thay `"symbol"` → `"symbols"`.
 - **Global Lock Rule:** `open_trade is not None` → không scan symbol mới. 1 lệnh tối đa toàn account, enforce trong `_state_idle()`.
-- **Anti-spam API:** `last_scanned_time[symbol]` — mỗi symbol chỉ scan nếu `elapsed >= 300s` (1 nến M5). Tránh spam MT5 API khi tất cả symbols đang trong cooldown.
+- **[HOTFIX] Candle Sync:** Xóa `elapsed >= 300s`. Thay bằng `mt5.copy_rates_from_pos(sym, M5, 0, 2)` → so sánh `rates[-2]["time"] > last_candle_time[symbol]`. Bắt đúng từng giây khi nến M5 vừa đóng, không bao giờ lệch pha.
+- **[HOTFIX] Ghost Order null-safe:** `if orders is None: continue` (thay vì `break`) — mạng lag 1s trả None không làm gián đoạn vòng chờ 30s.
+- **[HOTFIX] magic_number từ config:** Xóa hardcode `20250305`. Lưu `self.magic_number = int(cfg.get("magic_number", 20260305))` từ `__init__`, dùng thống nhất khắp file.
 - **IN_TRADE poll 0.5s** (`IN_TRADE_POLL_INTERVAL_SEC`); tất cả state khác 1s — bắt floating DD breach sớm hơn.
-- **Daily reset Server Time:** Đọc timestamp từ `mt5.symbol_info_tick()` + detect `_server_tz_offset` (UTC+2/+3 Exness) — không dùng UTC raw.
-- **Ghost Order:** Timeout 30s → `mt5.orders_get()` kiểm tra: có lệnh treo → CANCEL; có vị thế (confirm trễ) → IN_TRADE; không có gì → IDLE.
-- `risk_config.json` cập nhật: `daily_dd_limit 6%→15%`, `balance_floor 50%` (= system_max_dd 50%).
+- **Daily reset Server Time:** `mt5.symbol_info_tick()` timestamp + `_server_tz_offset` (UTC+2/+3 Exness).
+- **Ghost Order full flow:** Timeout 30s → poll position (fill muộn → IN_TRADE) → cancel lệnh treo → IDLE.
+- `risk_config.json`: `daily_dd_limit 6%→15%`, `balance_floor 50%`.

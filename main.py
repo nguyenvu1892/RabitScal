@@ -49,7 +49,6 @@ from strategy_engine import StrategyEngine, SignalResult
 LOOP_INTERVAL_SEC          = 1.0    # Tick chính (tất cả state trừ IN_TRADE)
 IN_TRADE_POLL_INTERVAL_SEC = 0.5    # Poll nhanh hơn khi đang giữ lệnh
 PENDING_ORDER_TIMEOUT_SEC  = 30     # Ghost order timeout
-MIN_SCAN_INTERVAL_SEC      = 300    # Anti-spam: 1 nến M5 giữa 2 lần scan cùng symbol
 
 
 # ---------------------------------------------------------------------------
@@ -115,8 +114,12 @@ class BotOrchestrator:
         self._running:       bool              = False
         self.daily_reset_done: bool            = False
 
-        # Anti-spam: {symbol: timestamp của lần scan cuối}
-        self.last_scanned_time: dict[str, float] = {s: 0.0 for s in self.symbols}
+        # Candle sync: {symbol: timestamp của nến M5 đã scan lần cuối}
+        # So sánh với candle[-1].time (nến vừa đóng) — chỉ scan khi có nến mới thực sự
+        self.last_candle_time: dict[str, int] = {s: 0 for s in self.symbols}
+
+        # Magic number từ config (tránh hardcode)
+        self.magic_number: int = int(self.cfg.get("magic_number", 20260305))
 
         # --- Modules ---
         pip_cfg  = self.cfg.get("pipeline", {})
@@ -218,16 +221,16 @@ class BotOrchestrator:
         """
         IDLE: Kiểm tra điều kiện rồi chọn symbol để scan.
 
-        Multi-symbol loop với Anti-spam (Global Lock Rule):
+        Multi-symbol loop với Candle Sync (Global Lock Rule):
             1. Nếu đang có lệnh mở (open_trade is not None) → không scan mới.
-            2. Bot phải ACTIVE (risk_mgr.is_active())
-            3. Session phải ACTIVE (pipeline.is_session_active())
-            4. Với từng symbol (theo thứ tự ưu tiên trong config):
-               Chỉ scan nếu: now - last_scanned_time[symbol] >= MIN_SCAN_INTERVAL_SEC
-               → Chống spam MT5 API, đảm bảo mỗi symbol chỉ scan 1 lần / nến M5
+            2. Bot phải ACTIVE, Session phải ACTIVE.
+            3. Với từng symbol theo thứ tự ưu tiên:
+               Fetch nhanh 2 nến M5 cuối (OHLCV chỉ lấy time).
+               Nếu candle_closed.time > self.last_candle_time[symbol]:
+                   → Có nến mới vừa đóng → cập nhật mốc → SCANNING.
+               → Không dùng elapsed 300s: bắt đúng pha nến, không bỏ lỡ hay trễ thêm.
 
-        Khi tìm thấy symbol đủ điều kiện → set active_symbol → SCANNING.
-        Nếu không có symbol nào đủ điều kiện → ở lại IDLE.
+        Chỉ chọn 1 symbol mỗi tick — return ngay sau khi chọn được.
         """
         # Global Lock: không scan khi đang có lệnh mở
         if self.open_trade is not None:
@@ -248,36 +251,46 @@ class BotOrchestrator:
             self.logger.debug("[IDLE] Outside active session — waiting")
             return
 
-        # Multi-symbol: loop qua từng symbol theo thứ tự ưu tiên
-        now_ts = time.monotonic()
+        # Candle Sync: loop từng symbol, kiểm tra nến M5 mới nhất đã đóng
         for symbol in self.symbols:
-            elapsed = now_ts - self.last_scanned_time.get(symbol, 0.0)
-            if elapsed < MIN_SCAN_INTERVAL_SEC:
-                # Chưa đến lúc scan symbol này (< 5 phút kể từ lần scan cuối)
-                remaining = int(MIN_SCAN_INTERVAL_SEC - elapsed)
+            # Fetch nhanh 2 nến M5 để lấy timestamp (không fetch full 1000 nến)
+            rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 2)
+
+            if rates is None or len(rates) < 2:
+                # API lỗi hoặc không đủ data — bỏ qua symbol này
+                self.logger.debug(f"[IDLE] {symbol}: cannot fetch M5 rates — skip")
+                continue
+
+            # rates[-2] = nến đã đóng cuối cùng (anti-repainting)
+            # rates[-1] = nến đang chạy (không dùng)
+            candle_closed_time = int(rates[-2]["time"])   # Unix timestamp (giây)
+
+            if candle_closed_time <= self.last_candle_time.get(symbol, 0):
+                # Chưa có nến mới — nến này đã cầm rồi, không scan lại
                 self.logger.debug(
-                    f"[IDLE] {symbol}: anti-spam skip | next scan in {remaining}s"
+                    f"[IDLE] {symbol}: same candle (t={candle_closed_time}) — skip"
                 )
                 continue
 
-            # Symbol này đủ điều kiện để scan → chọn và chuyển SCANNING
+            # Có nến M5 mới vừa đóng! Cập nhật mốc và chuyển sang SCANNING
+            self.last_candle_time[symbol] = candle_closed_time
             self.active_symbol = symbol
             self.logger.info(
-                f"[IDLE] Selected {symbol} for scan"
-                f" (elapsed={elapsed:.0f}s >= {MIN_SCAN_INTERVAL_SEC}s)"
+                f"[IDLE] {symbol}: new M5 candle detected"
+                f" (t={candle_closed_time}) → SCANNING"
             )
             self._transition(BotState.SCANNING)
-            return
+            return   # ← Chỉ chọn 1 symbol mỗi tick, return ngay
 
-        # Không có symbol nào đủ điều kiện — ở lại IDLE
-        self.logger.debug("[IDLE] All symbols in cooldown — waiting for next M5 bar")
+        # Không có symbol nào có nến mới — ở lại IDLE
+        self.logger.debug("[IDLE] No new M5 candle on any symbol — waiting")
 
     def _state_scanning(self) -> None:
         """
-        SCANNING: Fetch data cho active_symbol và phân tích tín hiệu.
+        SCANNING: Fetch data đầy đủ cho active_symbol và phân tích tín hiệu.
 
-        Sau khi scan (dù có signal hay không) → update last_scanned_time → IDLE.
-        Việc về IDLE sau mỗi scan đảm bảo bot round-robin qua các symbol.
+        Không cần update last_candle_time ở đây — đã update trong _state_idle().
+        Về IDLE sau mỗi lần scan (dù có signal hay không) để round-robin qua các symbol.
         """
         symbol = self.active_symbol
         if symbol is None:
@@ -313,8 +326,6 @@ class BotOrchestrator:
                 current_time = datetime.now(timezone.utc),
             )
 
-            self._update_scan_time(symbol)
-
             if signal.has_signal:
                 self.last_signal = signal
                 self.logger.info(
@@ -328,7 +339,6 @@ class BotOrchestrator:
 
         except Exception as e:
             self.logger.error(f"[SCANNING] {symbol}: error: {e}", exc_info=True)
-            self._update_scan_time(symbol)
             self._transition(BotState.IDLE)
 
     def _state_signal_found(self) -> None:
@@ -449,7 +459,7 @@ class BotOrchestrator:
             if positions:
                 for pos in positions:
                     # Lọc đúng magic number để tránh nhầm lệnh tay
-                    if pos.magic == self.cfg.get("magic_number", 20250305):
+                    if pos.magic == self.magic_number:
                         # Lệnh đã vào! confirmation về trễ
                         ticket_confirmed = pos.ticket
                         self.logger.info(
@@ -460,10 +470,16 @@ class BotOrchestrator:
                 if ticket_confirmed:
                     break
 
-            # Kiểm tra pending orders còn treo không
+            # Kiểm tra pending orders
             orders = mt5.orders_get(symbol=symbol)
-            if orders is None or len(orders) == 0:
-                # Không có lệnh treo → có thể reject đã xử lý hoặc fill xong
+            if orders is None:
+                # API trả None (lỗi mạng tạm thời) — thử lại ở giây tiếp theo
+                self.logger.debug(
+                    f"[PENDING_ORDER] {symbol}: orders_get returned None — retrying..."
+                )
+                continue   # ← FIX: continue, không break khi None
+            if len(orders) == 0:
+                # Chắc chắn không có lệnh treo — thoát vòng chờ
                 break
 
         # --- Bước 4: Phân loại kết quả sau timeout ---
@@ -483,7 +499,7 @@ class BotOrchestrator:
         pending_orders = mt5.orders_get(symbol=symbol)
         if pending_orders:
             for order in pending_orders:
-                if order.magic == self.cfg.get("magic_number", 20250305):
+                if order.magic == self.magic_number:
                     cancel_req = {
                         "action": mt5.TRADE_ACTION_REMOVE,
                         "order":  order.ticket,
@@ -650,8 +666,8 @@ class BotOrchestrator:
         self.state = new_state
 
     def _update_scan_time(self, symbol: str) -> None:
-        """Ghi nhận thời điểm scan symbol — phục vụ anti-spam."""
-        self.last_scanned_time[symbol] = time.monotonic()
+        """[DEPRECATED] Lưu vết scan — không còn dùng elapsed-time. Giữ lại để tương thích."""
+        pass   # last_candle_time được update trong _state_idle()
 
     def _close_all_orders_market(self) -> None:
         """Emergency: đóng tất cả positions theo giá market ngay lập tức."""
