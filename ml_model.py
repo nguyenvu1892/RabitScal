@@ -31,6 +31,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import os
@@ -44,7 +45,13 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
-import MetaTrader5 as mt5
+# MT5 chỉ khả dụng trên Windows — bọc try/except để không crash trên Xeon Linux
+try:
+    import MetaTrader5 as mt5
+    _MT5_AVAILABLE = True
+except ImportError:
+    mt5 = None  # type: ignore[assignment]
+    _MT5_AVAILABLE = False
 import numpy as np
 import optuna
 from filelock import FileLock
@@ -63,6 +70,7 @@ ML_CONFIG_PATH    = CONFIG_DIR / "ml_config.json"
 MAIN_CONFIG_PATH  = CONFIG_DIR / "main_config.json"
 ACTIVE_CFG_PATH   = CONFIG_DIR / "current_settings.json"
 DATA_CACHE_PATH   = DATA_DIR / "m5_historical.npy"
+CSV_DATA_PATH     = DATA_DIR / "history_m5.csv"   # Export từ Windows MT5 → đọc trên Xeon Linux
 STUDY_DB_PATH     = DATA_DIR / "optuna_study.db"
 STUDY_NAME        = "rabitscal_optuna_v1"
 
@@ -769,6 +777,88 @@ def run_optimization(
 # Data Fetcher — MT5 → numpy cache
 # ---------------------------------------------------------------------------
 
+def load_data_from_csv(
+    csv_path: str | Path | None = None,
+    *,
+    logger: logging.Logger,
+) -> np.ndarray:
+    """
+    LINUX-SAFE: Nạp dữ liệu M5 OHLCV từ file CSV (được export từ Windows bằng tools/export_mt5_data.py).
+    Không cần MT5, an toàn 100% trên Xeon Linux.
+
+    CSV Schema (header bắt buộc):
+        time,open,high,low,close,volume
+        (time là Unix timestamp — int seconds UTC)
+
+    Args:
+        csv_path: Đường dẫn tới file CSV. Mặc định: data/history_m5.csv
+        logger:   Logger instance
+
+    Returns:
+        np.ndarray shape (N, 6) — [time, open, high, low, close, volume]
+
+    Raises:
+        FileNotFoundError: nếu file CSV không tồn tại
+        ValueError:        nếu CSV thiếu cột hoặc không có dữ liệu
+    """
+    path = Path(csv_path) if csv_path else CSV_DATA_PATH
+
+    if not path.exists():
+        raise FileNotFoundError(
+            f"CSV data file not found: {path}\n"
+            f"  → Chạy trên Windows: python tools/export_mt5_data.py\n"
+            f"  → Rồi SCP file lên Xeon: scp data/history_m5.csv xeon:/path/RabitScal/data/"
+        )
+
+    logger.info(f"[DataLoad] Loading CSV: {path}")
+
+    required_cols = {"time", "open", "high", "low", "close", "volume"}
+    rows: list[list[float]] = []
+
+    with open(path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        if not reader.fieldnames:
+            raise ValueError(f"CSV file is empty or missing header: {path}")
+
+        actual_cols = set(reader.fieldnames)
+        missing = required_cols - actual_cols
+        if missing:
+            raise ValueError(
+                f"CSV missing required columns: {missing}\n"
+                f"  Required: {required_cols}\n"
+                f"  Found: {actual_cols}"
+            )
+
+        for row in reader:
+            try:
+                rows.append([
+                    float(row["time"]),
+                    float(row["open"]),
+                    float(row["high"]),
+                    float(row["low"]),
+                    float(row["close"]),
+                    float(row["volume"]),
+                ])
+            except (ValueError, KeyError) as e:
+                logger.warning(f"[DataLoad] Skipping malformed row: {e}")
+                continue
+
+    if not rows:
+        raise ValueError(f"No valid data rows found in CSV: {path}")
+
+    data = np.array(rows, dtype=np.float64)
+    # Sort by time (an toàn khi ghép nhiều file)
+    data = data[data[:, 0].argsort()]
+
+    logger.info(
+        f"[DataLoad] ✅ CSV loaded | shape={data.shape} | "
+        f"candles={len(data):,} | "
+        f"from={datetime.fromtimestamp(data[0,0], tz=timezone.utc).strftime('%Y-%m-%d')} "
+        f"to={datetime.fromtimestamp(data[-1,0], tz=timezone.utc).strftime('%Y-%m-%d')}"
+    )
+    return data
+
+
 def fetch_and_cache_data(
     symbols:       list[str],
     lookback_days: int,
@@ -783,6 +873,12 @@ def fetch_and_cache_data(
         np.ndarray shape (N, 6) — [time, open, high, low, close, volume]
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    if not _MT5_AVAILABLE or mt5 is None:
+        raise RuntimeError(
+            "MetaTrader5 không khả dụng trên hệ thống này (Linux/no MT5 install).\n"
+            "  → Dùng load_data_from_csv() hoặc chạy tools/export_mt5_data.py trên Windows trước."
+        )
 
     if not mt5.initialize():
         raise RuntimeError(f"MT5 initialize failed: {mt5.last_error()}")

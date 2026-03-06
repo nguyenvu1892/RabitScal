@@ -57,6 +57,8 @@ DATA_DIR     = PROJECT_ROOT / "data"
 REPORTS_DIR  = PROJECT_ROOT / "reports"
 LOGS_DIR     = PROJECT_ROOT / "logs"
 
+CSV_DATA_PATH = DATA_DIR / "history_m5.csv"   # Export từ Windows MT5 (tools/export_mt5_data.py)
+
 DEFAULT_COMMISSION_PER_LOT = 3.5    # USD/lot (Exness Standard Cent)
 DEFAULT_LOT_SIZE           = 0.01   # 1 micro-lot per trade
 DEFAULT_RR_RATIO           = 1.5    # TP = SL × 1.5
@@ -143,6 +145,86 @@ class BacktestReport:
     equity_curve:  Optional[np.ndarray] = None   # Cumulative PnL per trade
     drawdown_pct:  Optional[np.ndarray] = None   # Drawdown % per trade
     timestamps:    Optional[np.ndarray] = None   # Unix timestamps per trade close
+
+
+# ---------------------------------------------------------------------------
+# CSV Loader — LINUX-SAFE, không cần MT5
+# ---------------------------------------------------------------------------
+
+def load_ohlcv_from_csv(
+    csv_path: str | Path | None = None,
+) -> np.ndarray:
+    """
+    Nạp dữ liệu M5 OHLCV từ file CSV (export từ Windows bằng tools/export_mt5_data.py).
+    LINUX-SAFE: Không yêu cầu MetaTrader5.
+
+    CSV Schema (header bắt buộc):
+        time,open,high,low,close,volume
+        (time là Unix timestamp — int seconds UTC)
+
+    Args:
+        csv_path: Đường dẫn tới CSV file.
+                  Mặc định: data/history_m5.csv
+
+    Returns:
+        np.ndarray shape (N, 6) — [time, open, high, low, close, volume]
+
+    Raises:
+        FileNotFoundError: nếu file không tồn tại
+        ValueError:        nếu CSV sai format
+    """
+    import csv as _csv
+
+    path = Path(csv_path) if csv_path else CSV_DATA_PATH
+
+    if not path.exists():
+        raise FileNotFoundError(
+            f"CSV data file not found: {path}\n"
+            f"  → Chạy trên Windows: python tools/export_mt5_data.py\n"
+            f"  → SCP lên Xeon:       scp data/history_m5.csv xeon:/path/RabitScal/data/"
+        )
+
+    required_cols = {"time", "open", "high", "low", "close", "volume"}
+    rows: list[list[float]] = []
+
+    with open(path, "r", encoding="utf-8") as f:
+        reader = _csv.DictReader(f)
+        if not reader.fieldnames:
+            raise ValueError(f"CSV file rỗng hoặc thiếu header: {path}")
+
+        missing = required_cols - set(reader.fieldnames)
+        if missing:
+            raise ValueError(
+                f"CSV thiếu các cột bắt buộc: {missing}\n"
+                f"  Required: {required_cols}"
+            )
+
+        for row in reader:
+            try:
+                rows.append([
+                    float(row["time"]),
+                    float(row["open"]),
+                    float(row["high"]),
+                    float(row["low"]),
+                    float(row["close"]),
+                    float(row["volume"]),
+                ])
+            except (ValueError, KeyError):
+                continue
+
+    if not rows:
+        raise ValueError(f"Không có dữ liệu hợp lệ trong CSV: {path}")
+
+    data = np.array(rows, dtype=np.float64)
+    data = data[data[:, 0].argsort()]   # Sort by time
+
+    logger.info(
+        f"[load_ohlcv_from_csv] ✅ {len(data):,} candles | "
+        f"from={datetime.fromtimestamp(data[0,0], tz=timezone.utc).strftime('%Y-%m-%d')} "
+        f"to={datetime.fromtimestamp(data[-1,0], tz=timezone.utc).strftime('%Y-%m-%d')} | "
+        f"{path}"
+    )
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -705,6 +787,15 @@ def _parse_args() -> argparse.Namespace:
         help="Path to M5 historical numpy cache (.npy)",
     )
     parser.add_argument(
+        "--csv",
+        type=str,
+        default=None,
+        help=(
+            "Path to CSV file exportếd từ Windows MT5 (data/history_m5.csv). "
+            "Nếu được set, sẽ ưu tiên hơn --data (.npy)."
+        ),
+    )
+    parser.add_argument(
         "--out",
         type=str,
         default=str(REPORTS_DIR),
@@ -739,17 +830,29 @@ def main() -> None:
         cfg = json.load(f)
     params = cfg.get("params", cfg)  # Support both raw params and versioned format
 
-    # Load data
-    data_path = Path(args.data)
-    if not data_path.exists():
-        logger.error(
-            f"Data cache not found: {data_path}\n"
-            f"Run: python ml_model.py --fetch  to download M5 data first"
-        )
-        sys.exit(1)
+    # Load data — ưu tiên CSV (Linux-safe) hơn .npy (cần MT5 trước đó)
+    if args.csv:
+        csv_path = Path(args.csv)
+        if not csv_path.exists():
+            logger.error(
+                f"CSV file not found: {csv_path}\n"
+                f"Run on Windows: python tools/export_mt5_data.py"
+            )
+            sys.exit(1)
+        logger.info(f"[BacktestEnv] Loading data from CSV: {csv_path}")
+        data = load_ohlcv_from_csv(csv_path)
+    else:
+        data_path = Path(args.data)
+        if not data_path.exists():
+            logger.error(
+                f"Data cache not found: {data_path}\n"
+                f"Option 1 (Linux): Export CSV trước rồi dùng --csv data/history_m5.csv\n"
+                f"Option 2 (Windows): python ml_model.py --fetch"
+            )
+            sys.exit(1)
+        logger.info(f"[BacktestEnv] Loading data: {data_path}")
+        data = np.load(data_path)
 
-    logger.info(f"[BacktestEnv] Loading data: {data_path}")
-    data = np.load(data_path)
     logger.info(f"[BacktestEnv] Data loaded | shape={data.shape}")
 
     # Run backtest

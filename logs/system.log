@@ -1,0 +1,2 @@
+[2026-03-05 22:15:30 UTC] - [INFO] - [OrderManager] - Trade log initialized: data/trade_log.csv
+[2026-03-05 22:15:30 UTC] - [INFO] - [OrderManager] - OrderManager initialized | symbol=EURUSDc | max_spread=3.0pips | max_retry=3 | magic=20260305

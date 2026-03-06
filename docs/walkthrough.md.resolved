@@ -1,0 +1,468 @@
+# 🖥️ TASK 5.2 — Thiết Kế Kiến Trúc Web Dashboard (Realtime Candlestick + Bot Monitor)
+
+**Date:** 2026-03-06 01:08 UTC+7 | **Branch:** `task-5.2-dashboard` | **Author:** Antigravity
+**Status:** PENDING TechLead APPROVAL — Chưa code
+
+---
+
+## 🎯 Mission Statement
+
+Web Dashboard là **Mắt Thần** của toàn hệ thống — giao diện duy nhất để Tao và Sếp Vũ nhìn thấy bot đang **khôn hay ngu** trong realtime.
+
+Yêu cầu cốt lõi:
+- **Chart nến M5 realtime** — cập nhật từng tick khi nến mới đóng
+- **Vẽ overlay** — FVG box (vùng thoát), Entry arrow, SL/TP line đè lên chart
+- **Widget status** — BotState, Equity, Daily Drawdown %, trạng thái Safety Net
+- **Non-blocking** — Dashboard KHÔNG được làm chậm hoặc block luồng trade của `main.py` dù 1ms
+
+---
+
+## 🔀 LUỒNG DỮ LIỆU ĐẦU ĐỦ — Từ MT5 Tick đến Browser Chart
+
+```
+ MT5 Server (Exness)
+      │ tick giá / nến M5 mới đóng
+      ▼
+ main.py — BotOrchestrator._run_loop() [Thread 1]
+      │
+      │  Mỗi tick (1s), sau khi xử lý state xong:
+      │  dashboard_pub.publish(event)   ← NON-BLOCKING
+      │  (chỉ đẩy vào asyncio.Queue — không await, không block)
+      │
+      ▼
+ DashboardPublisher (asyncio.Queue)           [Thread 1 → Queue]
+      │  queue.put_nowait(event_dict)
+      │  Nếu queue đầy → discard oldest (không block trading)
+      ▼
+ dashboard.py — FastAPI Event Loop [Thread 6]
+      │  Background task: drain queue → broadcast sang tất cả WS clients
+      │
+      ├─ /ws  WebSocket endpoint
+      │       │ asyncio broadcast tới tất cả connected browsers
+      │       │ message = JSON event_dict
+      │       ▼
+      │  Browser (Chrome/Firefox)
+      │       JavaScript WebSocket.onmessage(event)
+      │       │
+      │       ├─ event.type == "candle_close"  → update LightweightCharts candleSeries
+      │       ├─ event.type == "signal_found"  → draw Entry arrow + FVG box
+      │       ├─ event.type == "order_filled"  → draw SL line + TP line
+      │       ├─ event.type == "state_change"  → update BotState badge
+      │       ├─ event.type == "equity_update" → update Equity widget + DD gauge
+      │       └─ event.type == "trade_closed"  → draw close marker + pnl badge
+      │
+      └─ /api/candles?symbol=EURUSDc&tf=M5&limit=500   [REST — initial load]
+         /api/trades?limit=50                           [REST — trade history]
+         /api/status                                    [REST — current bot state]
+```
+
+---
+
+## ⚙️ CẤU TRÚC FILE
+
+```
+RabitScal/
+├── dashboard.py              ← FastAPI app + WebSocket hub + Publisher API
+├── templates/
+│   └── index.html            ← Single-page app (HTML + CSS + JS inline)
+├── static/
+│   ├── css/
+│   │   └── dashboard.css     ← Dark theme, glassmorphism panel
+│   └── js/
+│       └── dashboard.js      ← LightweightCharts init + WS handler
+└── config/
+    └── dashboard_config.json ← host, port, max_ws_clients, queue_size
+```
+
+---
+
+## 🏗️ BACKEND — `dashboard.py` Architecture
+
+```
+FastAPI App
+│
+├─ Lifespan event (startup/shutdown)
+│       Khởi tạo DashboardHub (WebSocket manager)
+│       Spawn background task: _queue_drain_loop()
+│       Đọc dashboard_config.json
+│
+├─ ── REST ENDPOINTS ──────────────────────────────────────────────────
+│
+├─ GET /
+│       Render templates/index.html (Jinja2)
+│
+├─ GET /api/candles
+│       Params: symbol, tf (M5/M15/H1), limit (default 500)
+│       Logic: Đọc từ DataPipeline._data_store hoặc gọi MT5 
+│              copy_rates_from_pos() nếu pipeline chưa có
+│       Return: JSON array [{time, open, high, low, close, volume}, ...]
+│               ← Format chuẩn cho LightweightCharts candleSeries.setData()
+│
+├─ GET /api/trades
+│       Params: limit (default 50), status (open/closed/all)
+│       Logic: Đọc data/trade_log.csv (viết bởi execution.py)
+│       Return: JSON array [{ticket, direction, entry, sl, tp, pnl, ...}, ...]
+│
+├─ GET /api/status
+│       Return: JSON {
+│           bot_state: "IN_TRADE",
+│           equity: 1023.45,
+│           balance: 1000.00,
+│           daily_drawdown_pct: 2.31,
+│           open_trade: {ticket, direction, entry, sl, tp, floating_pnl},
+│           safety_net: "active" | "cooldown" | "paused" | "halted",
+│           last_signal_score: 0.71,
+│           uptime_sec: 3600
+│       }
+│
+├─ ── WEBSOCKET ENDPOINT ────────────────────────────────────────────────
+│
+├─ WS /ws
+│       DashboardHub.connect(websocket)
+│       Gửi ngay "snapshot" event (toàn bộ state hiện tại) sau khi connect
+│       Loop: nhận ping/keepalive từ client
+│       Cleanup: DashboardHub.disconnect(websocket) khi đóng
+│
+├─ ── INTERNAL ──────────────────────────────────────────────────────────
+│
+├─ DashboardHub  [WebSocket Manager]
+│       connected: set[WebSocket]
+│       async connect(ws) / disconnect(ws)
+│       async broadcast(message: dict) → gửi JSON tới tất cả connected clients
+│       (Bắt WebSocketDisconnect để tự dọn clients đã chết)
+│
+├─ DashboardPublisher  [Bridge sang main.py — THREAD-SAFE]
+│       _queue: asyncio.Queue(maxsize=200)
+│       publish(event: dict) → _queue.put_nowait(event)
+│                              (Non-blocking — nếu full thì discard oldest)
+│       _queue_drain_loop():  asyncio background task
+│           while True:
+│               event = await _queue.get()
+│               await hub.broadcast(event)
+│
+└─ Singleton: dashboard_pub = DashboardPublisher()
+              dashboard_hub = DashboardHub()
+              Được import bởi main.py để gọi publish()
+```
+
+---
+
+## 📡 WEBSOCKET EVENT SCHEMA
+
+Tất cả events gửi qua WS đều có format JSON chuẩn:
+
+```json
+{
+  "type":      "<event_type>",
+  "ts":        1741194000,
+  "symbol":    "EURUSDc",
+  "payload":   { ... }
+}
+```
+
+### Danh sách Event Types:
+
+| Type | Trigger trong main.py | Payload | Frontend Action |
+|------|----------------------|---------|-----------------|
+| `snapshot` | Khi WS client mới connect | full status object | Initial render toàn bộ UI |
+| `candle_close` | `_state_idle()` sau khi nến M5 mới đóng | `{time, o, h, l, c, vol}` | `candleSeries.update()` |
+| `state_change` | `_transition(new_state)` | `{old, new, ts}` | Update BotState badge + màu ring |
+| `equity_update` | `_state_in_trade()` mỗi 0.5s | `{equity, balance, floating_pnl, dd_pct}` | Update Equity widget + DD gauge |
+| `signal_found` | `_state_scanning()` khi signal | `{direction, score, fvg:{top,bot}, entry_price}` | Vẽ FVG box + entry line preview |
+| `order_filled` | `_state_pending_order()` FILLED | `{ticket, direction, entry, sl, tp, lot}` | Vẽ Entry arrow + SL/TP horizontal lines |
+| `trade_closed` | `_state_closing()` done | `{ticket, pnl, reason, close_price}` | Vẽ close marker + pnl badge trên chart |
+| `safety_event` | `risk_manager._trigger_*()` | `{level, reason, resume_at}` | Flash warning banner |
+| `fvg_detected` | `strategy_engine.analyze()` qua hub | `{direction, top, bot, age, quality}` | Vẽ FVG box (semi-transparent) |
+
+---
+
+## 🎨 FRONTEND — `templates/index.html` Layout
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  🐰 RabitScal Dashboard         [EURUSDc ▾] [M5 ▾]  ● CONNECTED   │
+│  Header bar — dark glassmorphism                                     │
+├──────────────────────────────────────┬──────────────────────────────┤
+│                                      │  BOT STATUS PANEL            │
+│   📈 CANDLESTICK CHART               │  ┌────────────────────────┐  │
+│   (LightweightCharts v4 - TradingView│  │ State: [IN_TRADE] 🟢   │  │
+│    Hosted via CDN)                   │  │ Safety: ACTIVE ✅       │  │
+│                                      │  └────────────────────────┘  │
+│   Overlays (drawn via chart api):    │                               │
+│   ━━━ SL line (dashed red)           │  EQUITY PANEL                │
+│   ━━━ TP line (dashed green)         │  ┌────────────────────────┐  │
+│   ▲   Entry BUY arrow (green)        │  │ Equity: $1,023.45      │  │
+│   ▼   Entry SELL arrow (red)         │  │ Balance: $1,000.00     │  │
+│   ▓▓▓ FVG Box (semi-transparent      │  │ Float P&L: +$23.45 🟢  │  │
+│        bull=teal, bear=orange)       │  └────────────────────────┘  │
+│                                      │                               │
+│   Bottom: Volume bars (rgba)         │  DAILY DD GAUGE               │
+│                                      │  ┌────────────────────────┐  │
+│                                      │  │  [=====>    ] 2.3%     │  │
+│                                      │  │  Limit: 6% (15% halt)  │  │
+│                                      │  └────────────────────────┘  │
+├──────────────────────────────────────┴──────────────────────────────┤
+│  TRADE HISTORY TABLE (last 20 trades)                                │
+│  Ticket | Dir  | Entry  | SL     | TP     | Close  | P&L  | Reason │
+│  12348  | BUY  | 1.0910 | 1.0888 | 1.0944 | 1.0942 | +3.2 | TP     │
+│  12347  | SELL | 1.0930 | 1.0952 | 1.0896 | 1.0952 | -2.2 | SL     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Design System:
+- **Theme:** Dark night `#0d0f14` background, glassmorphism panels `rgba(255,255,255,0.05)`
+- **Font:** Inter (Google Fonts CDN)
+- **Chart:** TradingView Lightweight Charts v4 (npm CDN — `unpkg.com`) — **không cần build tool**
+- **Colors:**
+  - BUY / Bullish: `#00d4a0` (teal-green)
+  - SELL / Bearish: `#ff4f6d` (neon-red)
+  - FVG Bull box: `rgba(0,212,160,0.12)`
+  - FVG Bear box: `rgba(255,79,109,0.12)`
+  - SL line: `#ff4f6d dashed`
+  - TP line: `#00d4a0 dashed`
+  - Neutral: `#8892a4` (muted gray)
+
+---
+
+## 🔗 TÍCH HỢP VỚI `main.py` — Non-Blocking Pattern
+
+Đây là điểm kỹ thuật quan trọng nhất: làm thế nào để `main.py` đẩy data sang dashboard mà **không bị block 1 micro-giây nào**.
+
+### Giải pháp: Singleton Publisher + `put_nowait()`
+
+```python
+# dashboard.py — exported singleton
+dashboard_pub: DashboardPublisher  # được khởi tạo khi import
+
+# main.py — chỉ cần import 1 dòng
+from dashboard import dashboard_pub
+
+class BotOrchestrator:
+
+    def _transition(self, new_state: BotState) -> None:
+        old = self.state
+        self.state = new_state
+        self.log.info(f"[STATE] {old.name} → {new_state.name}")
+
+        # ← Non-blocking publish (put_nowait không await, không block)
+        dashboard_pub.publish({
+            "type":    "state_change",
+            "ts":      int(time.time()),
+            "symbol":  self.current_symbol,
+            "payload": {"old": old.name, "new": new_state.name}
+        })
+
+    def _state_in_trade(self) -> None:
+        account = mt5.account_info()
+        safe = self.risk.check_floating_drawdown(account.equity)
+        # ... trading logic ...
+
+        # Publish equity update — every 0.5s tick, zero overhead
+        dashboard_pub.publish({
+            "type":    "equity_update",
+            "ts":      int(time.time()),
+            "symbol":  self.current_symbol,
+            "payload": {
+                "equity":        account.equity,
+                "balance":       account.balance,
+                "floating_pnl":  account.equity - account.balance,
+                "dd_pct":        round((1 - account.equity / self.risk._daily_start_balance) * 100, 2)
+            }
+        })
+```
+
+### Tại sao `asyncio.Queue + put_nowait()` là đúng:
+
+| Phương án | Vấn đề |
+|-----------|--------|
+| `asyncio.Queue.put()` | Cần `await` → phải biến `_run_loop` thành `async def` → phá vỡ toàn bộ `main.py` |
+| `threading.Queue` | Thread-safe nhưng cần thêm bridge thread để drain vào asyncio event loop |
+| `Redis pub/sub` | Overkill, thêm dependency nặng |
+| **`asyncio.Queue.put_nowait()`** ✅ | **Non-blocking hoàn toàn. Nếu queue đầy → discard silently. Main.py không bao giờ biết và không quan tâm.** |
+
+### Khởi chạy Dashboard song song với Bot:
+
+**Option A (Recommended): Chạy 2 process riêng**
+```bash
+# Terminal 1: Bot live trading
+python3 main.py
+
+# Terminal 2: Dashboard (độc lập, không ảnh hưởng bot)
+python3 dashboard.py
+# → http://localhost:8888
+```
+
+**Option B: Spawn Dashboard trong thread riêng từ main.py**
+```python
+# main.py __init__:
+import threading, uvicorn
+from dashboard import app as dash_app
+dash_thread = threading.Thread(
+    target=uvicorn.run,
+    args=(dash_app,),
+    kwargs={"host": "0.0.0.0", "port": 8888, "log_level": "warning"},
+    daemon=True
+)
+dash_thread.start()
+```
+
+→ **Option A được khuyến nghị** — dashboard crash không kéo bot chết theo. Tuy nhiên khi chạy Option A, `dashboard_pub.publish()` trong `main.py` phải dùng **shared file / IPC** thay vì in-process queue.
+
+**Giải pháp IPC cho Option A: Shared JSON state file**
+```python
+# main.py: ghi event ra data/dashboard_events.jsonl (append-only ring buffer)
+# dashboard.py: tail -f file này, parse events, broadcast qua WS
+# → Đơn giản, zero dependency, latency ~ 50ms (1 file write/read cycle)
+# → Phù hợp cho debug/monitoring (không cần realtime ms-level)
+```
+
+---
+
+## 📦 API SPEC CHI TIẾT
+
+### `GET /api/candles`
+```
+Params:
+  symbol: str  = "EURUSDc"
+  tf:     str  = "M5"     (M5 | M15 | H1)
+  limit:  int  = 500
+
+Response 200:
+[
+  {"time": 1741194000, "open": 1.0910, "high": 1.0944,
+   "low": 1.0905, "close": 1.0942, "volume": 1243},
+  ...
+]
+# time: UNIX timestamp (seconds) — LightweightCharts dùng trực tiếp
+```
+
+### `GET /api/trades`
+```
+Response 200:
+[
+  {
+    "ticket": 12348,
+    "symbol": "EURUSDc",
+    "direction": "BUY",
+    "entry_price": 1.0910,
+    "sl_price": 1.0888,
+    "tp_price": 1.0944,
+    "close_price": 1.0942,
+    "lot": 0.02,
+    "pnl": 6.40,
+    "open_time": 1741194000,
+    "close_time": 1741197600,
+    "close_reason": "TP",
+    "signal_score": 0.71
+  },
+  ...
+]
+```
+
+### `GET /api/status`
+```
+Response 200:
+{
+  "bot_state":         "IN_TRADE",
+  "current_symbol":    "EURUSDc",
+  "equity":            1023.45,
+  "balance":           1000.00,
+  "floating_pnl":      23.45,
+  "daily_dd_pct":      2.31,
+  "daily_dd_limit_pct": 6.00,
+  "safety_net_status": "active",
+  "open_trade": {
+    "ticket": 12349,
+    "direction": "BUY",
+    "entry_price": 1.0912,
+    "sl_price": 1.0890,
+    "tp_price": 1.0946,
+    "floating_pnl": 23.45
+  },
+  "uptime_sec": 3600,
+  "last_updated": 1741194050
+}
+```
+
+---
+
+## 🎨 CHART OVERLAY — LightweightCharts API
+
+Đây là phần TechLead và Sếp Vũ sẽ nhìn thấy nhiều nhất. Cần rõ ràng, đẹp, không rối:
+
+```javascript
+// Khởi tạo chart
+const chart = LightweightCharts.createChart(document.getElementById('chart'), {
+    layout: { background: {color: '#0d0f14'}, textColor: '#8892a4' },
+    grid:   { vertLines: {color: '#1a1d26'}, horzLines: {color: '#1a1d26'} },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    width:  document.getElementById('chart').clientWidth,
+    height: 520,
+});
+
+const candleSeries = chart.addCandlestickSeries({
+    upColor:   '#00d4a0', downColor:  '#ff4f6d',
+    borderUpColor: '#00d4a0', borderDownColor: '#ff4f6d',
+    wickUpColor:   '#00d4a0', wickDownColor:   '#ff4f6d',
+});
+
+// Khi nhận candle_close event qua WS:
+// candleSeries.update({time, open, high, low, close});
+
+// ── FVG Box ────────────────────────────────────────────────────────────
+// Dùng chart.addHistogramSeries() hoặc Series với custom markers
+// Alternatively: SVG overlay div absolute-positioned trên chart canvas
+
+// ── SL / TP Lines ──────────────────────────────────────────────────────
+const slLine = chart.addLineSeries({
+    color: '#ff4f6d', lineWidth: 1,
+    lineStyle: LightweightCharts.LineStyle.Dashed,
+    lastPriceAnimation: LightweightCharts.LastPriceAnimationMode.Disabled,
+});
+// slLine.setData([{time: entry_time, value: sl_price}, {time: now, value: sl_price}]);
+
+// ── Entry Marker ───────────────────────────────────────────────────────
+candleSeries.setMarkers([{
+    time:     entry_time,
+    position: 'belowBar',  // BUY: below; SELL: above
+    color:    '#00d4a0',
+    shape:    'arrowUp',   // BUY arrow
+    text:     `BUY @ ${entry_price}`,
+}]);
+```
+
+---
+
+## 📋 IMPLEMENTATION PLAN (Sau khi TechLead duyệt)
+
+| File | Dòng ước tính | Nội dung |
+|------|--------------|---------|
+| `dashboard.py` | ~400 | FastAPI app, DashboardHub, DashboardPublisher, REST + WS endpoints |
+| `templates/index.html` | ~250 | Layout, LightweightCharts init, WS handler, widget logic |
+| `static/css/dashboard.css` | ~150 | Dark theme, glassmorphism, responsive grid |
+| `static/js/dashboard.js` | ~300 | Chart init, WS reconnect, overlay draw, event dispatch |
+| `config/dashboard_config.json` | ~20 | host, port, max_clients, queue_size, event_file_path |
+| **Total** | **~1,120** | |
+
+---
+
+## ❓ CÂU HỎI CẦN TECHLED QUYẾT ĐỊNH TRƯỚC KHI CODE
+
+1. **IPC Strategy (Option A vs B):** Mày có muốn Dashboard và Bot chạy **2 process riêng** (robustness cao hơn — dashboard crash không kéo bot) hay **cùng 1 process** (latency thấp hơn, queue in-memory trực tiếp)?
+   - Option A (2 process): dùng `data/dashboard_events.jsonl` ring buffer làm IPC bridge
+   - Option B (1 process): `dashboard_pub.publish()` trực tiếp in-memory, spawn dashboard trong daemon thread
+
+2. **Chart Library:** Tao đề xuất dùng **TradingView Lightweight Charts v4** (CDN, không cần build, professional-grade, MIT license). Có muốn dùng **Plotly.js** thay không? LW Charts đẹp hơn nhiều cho candlestick nhưng không có pie chart hoặc correlation plot.
+
+3. **FVG Box rendering:** LightweightCharts không có native rectangle overlay. Có 2 cách:
+   - **Cách A:** Dùng 2 LineSeries (top + bottom của FVG box) + custom shadings — đơn giản
+   - **Cách B:** Absolute-positioned div overlay trên canvas (pixel-perfect nhưng cần coordinate transform) — phức tạp hơn
+   Khuyến nghị: **Cách A** cho V1 dashboard.
+
+4. **Auth:** Dashboard có cần login/password không (chạy trên VPS public) hay chỉ bind `localhost` là đủ?
+
+5. **Mobile responsive:** Cần nhìn được trên điện thoại không, hay chỉ cần đẹp trên desktop (max width 1920px)?
+
+---
+
+*Thiết kế bởi Antigravity — 2026-03-06 01:08 UTC+7 | Branch: task-5.2-dashboard | PENDING TechLead APPROVAL*
