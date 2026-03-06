@@ -77,20 +77,189 @@ STUDY_NAME        = "rabitscal_optuna_v1"
 # Optuna defaults (overridable via ml_config.json)
 DEFAULT_N_TRIALS      = 500
 DEFAULT_N_WORKERS     = 48
-DEFAULT_MIN_TRADES    = 200
+DEFAULT_MIN_TRADES    = 1000   # Scalping: 5-10 lệnh/ngày × 250 ngày giao dịch
 DEFAULT_MAX_DD_LIMIT  = 0.15
 DEFAULT_LOOKBACK_DAYS = 180
-DEFAULT_OOS_HOURS     = 24
+DEFAULT_OOS_HOURS     = 720    # 1 tháng OOS — đủ rổ M5/M15 để validate (30 ngày)
 DEFAULT_PROMOTE_THR   = 0.95
 DEFAULT_RETIRE_THR    = 0.80
 
-# Objective weights
-WR_WEIGHT  = 0.60
-PF_WEIGHT  = 0.40
+# Scalping Fitness Weights
+SCALP_WR_WEIGHT     = 100.0   # Thưởng nặng Winrate: mỗi %WR = 1 điểm
+SCALP_PF_WEIGHT     = 10.0    # Profit Factor thưởng vừa
+SCALP_COUNT_WEIGHT  = 0.05    # 1/20 điểm mỗi lệnh (tỉ lệ tăng dần)
+# Formula: score = WR×100 + PF×10 + trades×0.05 - DD_penalty×50
+
 
 # ---------------------------------------------------------------------------
-# Logging
+# Asset-Class Search Space Configuration
+# Tại sao cần: mỗi nhóm tài sản có độ biến động, spread, và pattern hành vi riêng.
+# Một search space chung cho cả 7 symbols sẽ luôn generate ra 100% pruned trials
+# vì ngưỡng sỡ quá chặt với tài sản biến động mạnh (XAU, US30) hoặc quá lỏng với Forex.
 # ---------------------------------------------------------------------------
+
+ASSET_CLASS_CONFIG: dict[str, dict] = {
+    # ── METAL / CRYPTO (SCALPING): Gold, Silver, BTC — tần suất cao, lọc nhẹ
+    "METAL": {
+        "_symbols":             ["XAU", "XAG", "GOLD", "BTC", "ETH"],
+        "atr_sl_multiplier":    (0.3,  1.2),
+        "atr_lot_multiplier":   (0.005, 0.05),
+        "atr_fvg_buffer":       (0.01, 0.3),
+        "vsa_volume_ratio":     (1.0,  1.8),
+        "vsa_neighbor_ratio":   (1.0,  1.4),
+        "vsa_min_score":        (0.1,  0.4),
+        "pinbar_wick_ratio":    (0.30, 0.60),
+        "pinbar_body_ratio":    (0.05, 0.50),
+        "composite_score_gate": (0.10, 0.40),
+        "min_trades":           50,
+        "max_dd_limit":         0.95,
+        "spread_cost":          0.40,
+        "pip_value":            1.0,    # XAUUSD: 1 price-unit ≈ $1 / micro-lot
+        "label":                "METAL-SCALP",
+    },
+    "BTC": {
+        "_symbols":             ["BTC", "ETH"],
+        "atr_sl_multiplier":    (0.3,  1.2),
+        "atr_lot_multiplier":   (0.002, 0.02),
+        "atr_fvg_buffer":       (0.01, 0.3),
+        "vsa_volume_ratio":     (1.0,  1.8),
+        "vsa_neighbor_ratio":   (1.0,  1.4),
+        "vsa_min_score":        (0.1,  0.4),
+        "pinbar_wick_ratio":    (0.30, 0.60),
+        "pinbar_body_ratio":    (0.05, 0.50),
+        "composite_score_gate": (0.10, 0.40),
+        "min_trades":           50,
+        "max_dd_limit":         0.95,
+        "spread_cost":          5.00,
+        "pip_value":            1.0,    # BTC micro: 1 price-unit ≈ $1
+        "label":                "BTC-SCALP",
+    },
+
+    # ── INDICES: US30/US500/USTEC/Dow/Nasdaq — biến động vừa, trending mạnh
+    "INDEX": {
+        "_symbols":             ["US30", "US100", "US500", "USTEC", "SPX", "NAS", "DAX", "GER"],
+        "atr_sl_multiplier":    (0.8,  3.5),
+        "atr_lot_multiplier":   (0.002, 0.03),
+        "atr_fvg_buffer":       (0.2,  1.2),
+        "vsa_volume_ratio":     (1.15, 2.8),
+        "vsa_neighbor_ratio":   (1.05, 1.9),
+        "vsa_min_score":        (0.25, 0.55),
+        "pinbar_wick_ratio":    (0.45, 0.72),
+        "pinbar_body_ratio":    (0.08, 0.38),
+        "composite_score_gate": (0.35, 0.65),
+        "min_trades":           20,     # tăng từ 5 → 20 — tránh overfit WR=100% với 10 trades
+        "max_dd_limit":         0.95,
+        "spread_cost":          0.03,
+        "pip_value":            1.0,    # US30 micro: price-unit ≈ $1
+        "label":                "INDICES",
+    },
+    # ── OIL: USOIL, UKOIL — biến động vừa, nhạy cảm với news
+    "OIL": {
+        "_symbols":             ["USOIL", "UKOIL", "OIL", "WTI", "BRENT"],
+        "atr_sl_multiplier":    (0.9,  3.5),
+        "atr_lot_multiplier":   (0.003, 0.04),
+        "atr_fvg_buffer":       (0.2,  1.0),
+        "vsa_volume_ratio":     (1.1,  2.5),
+        "vsa_neighbor_ratio":   (1.05, 1.9),
+        "vsa_min_score":        (0.25, 0.55),
+        "pinbar_wick_ratio":    (0.48, 0.72),
+        "pinbar_body_ratio":    (0.09, 0.38),
+        "composite_score_gate": (0.35, 0.65),
+        "min_trades":           5,
+        "max_dd_limit":         0.95,
+        "spread_cost":          0.025,
+        "pip_value":            1.0,   # Convention: 1 price-unit = $1 (same as all assets)
+        "label":                "OIL",
+    },
+    # ── FOREX-MAJOR: EUR, GBP — gate thấp hơn để Smart DCA sinh lệnh
+    "FOREX-MAJOR": {
+        "_symbols":             ["EUR", "GBP"],
+        "atr_sl_multiplier":    (0.8,  3.0),
+        "atr_lot_multiplier":   (0.005, 0.05),
+        "atr_fvg_buffer":       (0.3,  1.5),
+        "vsa_volume_ratio":     (1.1,  2.5),
+        "vsa_neighbor_ratio":   (1.0,  1.8),
+        "vsa_min_score":        (0.2,  0.5),
+        "pinbar_wick_ratio":    (0.40, 0.70),
+        "pinbar_body_ratio":    (0.10, 0.45),
+        "composite_score_gate": (0.30, 0.60),   # Hạ xuống để Smart DCA có lệnh
+        "min_trades":           5,
+        "max_dd_limit":         0.95,
+        "spread_cost":          0.00015,
+        "pip_value":            1.0,
+        "label":                "FOREX-MAJOR",
+    },
+    # ── FOREX: JPY, AUD, CHF — spread nhỏ, độ biến động thấp
+    "FOREX": {
+        "_symbols":             ["JPY", "AUD", "CHF", "NZD", "CAD"],
+        "atr_sl_multiplier":    (0.8,  3.0),
+        "atr_lot_multiplier":   (0.005, 0.05),
+        "atr_fvg_buffer":       (0.3,  1.5),
+        "vsa_volume_ratio":     (1.2,  3.0),
+        "vsa_neighbor_ratio":   (1.1,  2.0),
+        "vsa_min_score":        (0.3,  0.6),
+        "pinbar_wick_ratio":    (0.50, 0.75),
+        "pinbar_body_ratio":    (0.10, 0.40),
+        "composite_score_gate": (0.45, 0.75),
+        "min_trades":           5,
+        "max_dd_limit":         0.95,
+        "spread_cost":          0.00015,
+        "pip_value":            1.0,
+        "label":                "FOREX",
+    },
+    # ── CRYPTO ALT: ADA, DOGE, SOL, XRP, LINK, BNB — biến động cao, lọc chặt
+    "CRYPTO": {
+        "_symbols":             ["ADA", "DOGE", "SOL", "XRP", "LINK", "BNB"],
+        "atr_sl_multiplier":    (0.3,  1.5),
+        "atr_lot_multiplier":   (0.002, 0.03),
+        "atr_fvg_buffer":       (0.01, 0.4),
+        "vsa_volume_ratio":     (1.0,  2.0),
+        "vsa_neighbor_ratio":   (1.0,  1.5),
+        "vsa_min_score":        (0.1,  0.4),
+        "pinbar_wick_ratio":    (0.30, 0.65),
+        "pinbar_body_ratio":    (0.05, 0.50),
+        "composite_score_gate": (0.10, 0.45),
+        "min_trades":           15,     # tăng từ 10 → 15 — CRYPTO biến động cao cần mẫu lớn
+        "max_dd_limit":         0.95,
+        "spread_cost":          0.001,
+        "pip_value":            1.0,   # CRYPTO micro: 1 price-unit = $1
+        "label":                "CRYPTO-ALT",
+    },
+}
+
+# Fallback khi không detect được symbol
+_ASSET_CLASS_DEFAULT = ASSET_CLASS_CONFIG["FOREX"]
+
+
+def detect_asset_class(data_path: str | None) -> dict:
+    """
+    Detect asset class từ tên file CSV (args.data).
+    Ví dụ: 'data/history_XAUUSDm_M5.csv' → METAL
+
+    Returns:
+        config dict từ ASSET_CLASS_CONFIG (bao gồm search space và min_trades)
+    """
+    if not data_path:
+        return _ASSET_CLASS_DEFAULT
+
+    name = Path(data_path).stem.upper()  # 'history_XAUUSDm_M5'
+    for cls_name, cfg in ASSET_CLASS_CONFIG.items():
+        for sym in cfg["_symbols"]:
+            if sym.upper() in name:
+                logger_tmp = logging.getLogger("MLEngine")
+                logger_tmp.info(
+                    f"[AssetClass] Detected '{sym}' in '{Path(data_path).name}' "
+                    f"→ class={cfg['label']} | "
+                    f"gate={cfg['composite_score_gate']} min_trades={cfg['min_trades']}"
+                )
+                return cfg
+
+    logging.getLogger("MLEngine").warning(
+        f"[AssetClass] Cannot detect symbol from '{data_path}' — using FOREX defaults"
+    )
+    return _ASSET_CLASS_DEFAULT
+
+
 
 def _build_logger(name: str) -> logging.Logger:
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -142,6 +311,12 @@ class OptimizationResult:
     duration_sec:  float
     shadow_path:   str
     created_at:    str
+    # Best trial metrics (cất để SCANNER_RESULT JSON không cần re-run)
+    best_winrate:  float = 0.0
+    best_pf:       float = 0.0
+    best_dd:       float = 0.0
+    best_trades:   int   = 0
+    deploy_status: str   = ""
 
 
 @dataclass
@@ -213,8 +388,10 @@ def run_backtest_fast(
     data:   np.ndarray,
     params: dict,
     *,
-    commission_per_lot: float = 3.5,   # USD/lot (Exness typical)
-    lot_size:           float = 0.01,  # Fixed 1 micro-lot per trade
+    commission_per_lot: float = 3.5,
+    spread_cost:        float = 0.0,
+    pip_value:          float = 1.0,   # Normalize PnL per price-unit (OIL=0.01, others=1.0)
+    lot_size:           float = 0.01,
 ) -> BacktestResult:
     """
     Vectorized backtest — không có Python for-loop ở lớp indicator.
@@ -325,57 +502,118 @@ def run_backtest_fast(
     buy_signal[:15]  = False
     sell_signal[:15] = False
 
-    # ── [7] Trade simulation — OHLC worst-case model ───────────────────────
-    sl_dist    = atr * params["atr_sl_multiplier"]  # SL distance (price units)
-    rr_ratio   = 1.5                                  # TP = SL × 1.5
-    commission = commission_per_lot * lot_size        # USD per round trip
+    # ── [7] Smart DCA Basket Simulation ────────────────────────────────────
+    # Approved config:
+    #   MAX_BASKET   = 3 entries
+    #   DCA_GAP      = 0.8 × ATR (giá phải đi ngược sâu hơn mới nhồi)
+    #   BASKET_SL    = 25 USD hard cap (đóng toàn rổ khi tổng PnL âm ≥ $25)
+    #   BASKET_TP    = price level của lệnh đầu tiên (TP1)
+    #   COST         = commission + spread mỗi entry riêng
+    MAX_BASKET     = 3
+    DCA_GAP_MULT   = 0.8
+    BASKET_SL_MULT = 2.5   # Hard cầu chì = 2.5 × sl_dist[L1]
+    RR_RATIO       = 1.5
+    # cost_per_trade giữ theo USD (nhất quán với convention cũ Single-Trade)
+    cost_per_trade = commission_per_lot * lot_size + spread_cost
 
+    sl_dist = atr * params["atr_sl_multiplier"]
     pnl_list: list[float] = []
-    in_trade   = False
-    entry_price = 0.0
-    sl_price    = 0.0
-    tp_price    = 0.0
-    direction   = 0  # 1=BUY, -1=SELL
+
+    direction     = 0
+    entries: list[tuple[float, int]] = []
+    basket_tp     = 0.0
+    basket_sl_thr = 0.0    # = BASKET_SL_MULT × sl_dist[L1] (price-unit)
+    last_dca_bar  = -999
+
+    def basket_pnl(cur_price: float) -> float:
+        """Tổng PnL price-unit × pip_value — normalize OIL/FOREX về USD-đồng nhất."""
+        return sum((cur_price - ep) * direction for ep, _ in entries) * pip_value
+
+    def close_basket(exit_pnl_pu: float) -> None:
+        """exit_pnl_pu là price-unit; cost_per_trade trừ theo USD (1:1 với price-unit do convention backtest)."""
+        n   = len(entries)
+        net = exit_pnl_pu - cost_per_trade * n
+        pnl_list.append(net)
+        entries.clear()
+        nonlocal direction, basket_tp, last_dca_bar, basket_sl_thr
+        direction     = 0
+        basket_tp     = 0.0
+        basket_sl_thr = 0.0
 
     for i in range(15, N - 1):
-        if not in_trade:
-            # Ưu tiên BUY signal; SELL khi không có BUY
-            if buy_signal[i]:
-                entry_price = closes[i]
-                sl_price    = entry_price - sl_dist[i]
-                tp_price    = entry_price + sl_dist[i] * rr_ratio
-                direction   = 1
-                in_trade    = True
-            elif sell_signal[i]:
-                entry_price = closes[i]
-                sl_price    = entry_price + sl_dist[i]
-                tp_price    = entry_price - sl_dist[i] * rr_ratio
-                direction   = -1
-                in_trade    = True
-        else:
-            next_h = highs[i]
-            next_l = lows[i]
+        nh = highs[i + 1]    # next candle high (OHLC worst-case check)
+        nl = lows[i + 1]     # next candle low
 
-            if direction == 1:
-                # BUY: worst-case → SL check first
-                if next_l <= sl_price:
-                    pnl_list.append(-(sl_dist[i - 1]) - commission)
-                    in_trade = False
-                elif next_h >= tp_price:
-                    pnl_list.append(sl_dist[i - 1] * rr_ratio - commission)
-                    in_trade = False
-            else:
-                # SELL: worst-case → SL check first
-                if next_h >= sl_price:
-                    pnl_list.append(-(sl_dist[i - 1]) - commission)
-                    in_trade = False
-                elif next_l <= tp_price:
-                    pnl_list.append(sl_dist[i - 1] * rr_ratio - commission)
-                    in_trade = False
+        # ── Trạng thái KHÔNG có rổ → tìm entry L1 ──────────────────────────
+        if not entries:
+            if buy_signal[i]:
+                entries.append((closes[i], i))
+                direction     = 1
+                basket_tp     = closes[i] + sl_dist[i] * RR_RATIO
+                basket_sl_thr = BASKET_SL_MULT * sl_dist[i] * pip_value
+                last_dca_bar  = i
+            elif sell_signal[i]:
+                entries.append((closes[i], i))
+                direction     = -1
+                basket_tp     = closes[i] - sl_dist[i] * RR_RATIO
+                basket_sl_thr = BASKET_SL_MULT * sl_dist[i] * pip_value
+                last_dca_bar  = i
+
+        # ── Trạng thái CÓ rổ ────────────────────────────────────────────────
+        else:
+            cur_close = closes[i]
+
+            # 1) Check Basket Hard SL: worst-case price (nh/nl)
+            check_price_sl = nl if direction == 1 else nh
+            if direction * (basket_tp - check_price_sl) > 0:
+                floating = basket_pnl(check_price_sl)
+                if floating <= -basket_sl_thr:
+                    close_basket(-basket_sl_thr)
+                    continue
+
+            # 2) Check Basket TP
+            hit_tp = (direction == 1  and nh >= basket_tp) or \
+                     (direction == -1 and nl <= basket_tp)
+            if hit_tp:
+                tp_pnl = basket_pnl(basket_tp)
+                close_basket(tp_pnl)
+                continue
+
+            # 3) Floating SL — worst-case within-candle
+            wprice = nl if direction == 1 else nh
+            if basket_pnl(wprice) <= -basket_sl_thr:
+                close_basket(-basket_sl_thr)
+                continue
+
+            # 4) DCA Opportunity — nhồi thêm nếu đủ điều kiện
+            n_entries = len(entries)
+            if n_entries < MAX_BASKET and (i - last_dca_bar) >= 3:
+                gap_needed = DCA_GAP_MULT * atr[i]
+                last_ep    = entries[-1][0]
+
+                # Giá phải đi ngược đủ sâu (0.8 × ATR)
+                price_moved_against = (direction == 1  and cur_close <= last_ep - gap_needed) or \
+                                      (direction == -1 and cur_close >= last_ep + gap_needed)
+
+                # Tín hiệu xác nhận cùng chiều (pinbar + VSA — lỏng hơn L1)
+                if direction == 1:
+                    confirm = bull_pinbar[i] and vsa_mask[i]
+                else:
+                    confirm = bear_pinbar[i] and vsa_mask[i]
+
+                if price_moved_against and confirm:
+                    entries.append((cur_close, i))
+                    last_dca_bar = i
+
+    # Đóng rổ cuối nếu vẫn còn mở
+    if entries:
+        final_pnl = basket_pnl(closes[-1])
+        close_basket(final_pnl)
 
     # ── [8] Aggregate metrics ───────────────────────────────────────────────
-    if len(pnl_list) < 10:
+    if len(pnl_list) < 3:   # objective() tầng trên sẽ lọc min_trades thực tế
         raise optuna.exceptions.TrialPruned()
+
 
     pnl     = np.array(pnl_list, dtype=np.float64)
     wins    = (pnl > 0)
@@ -386,15 +624,22 @@ def run_backtest_fast(
     winrate       = n_wins / len(pnl)
     gross_profit  = pnl[wins].sum()  if n_wins > 0 else 0.0
     gross_loss    = abs(pnl[losses].sum()) if n_loss > 0 else 1e-8
-    profit_factor = gross_profit / gross_loss
-    avg_win       = gross_profit / n_wins  if n_wins > 0 else 0.0
-    avg_loss      = gross_loss   / n_loss  if n_loss > 0 else 0.0
+    # Cap PF tại 999 khi n_loss=0 — tránh score overflow tỷ tỷ trong scalp_score formula
+    profit_factor = min(gross_profit / gross_loss, 999.0)
 
-    # Max Drawdown từ equity curve
-    equity   = np.cumsum(pnl)
-    peak     = np.maximum.accumulate(equity)
-    drawdown = np.where(peak > 0, (peak - equity) / (peak + 1e-8), 0.0)
-    max_dd   = float(drawdown.max())
+    avg_win  = gross_profit / n_wins if n_wins > 0 else 0.0
+    avg_loss = gross_loss   / n_loss if n_loss > 0 else 0.0
+
+    # Max Drawdown — chuẩn hóa về % equity
+    # Dùng tổng exposure tuyệt đối làm initial_equity anchor để tránh
+    # divide-by-tiny-peak bug trên tài sản giá cao (XAUUSD, US30)
+    equity    = np.cumsum(pnl)
+    total_abs = gross_profit + gross_loss          # tổng thanh khoản
+    anchor    = max(total_abs / len(pnl) * 100.0, 1e-8)  # ~100× avg trade
+
+    peak      = np.maximum.accumulate(equity + anchor)   # shift về dương
+    drawdown  = (peak - (equity + anchor)) / peak         # luôn trong [0,1]
+    max_dd    = float(drawdown.max())
 
     return BacktestResult(
         winrate=float(winrate),
@@ -406,6 +651,7 @@ def run_backtest_fast(
         avg_win=float(avg_win),
         avg_loss=float(avg_loss),
     )
+
 
 
 # ---------------------------------------------------------------------------
@@ -450,6 +696,8 @@ def _run_trial_worker(args: tuple) -> dict:
     except optuna.exceptions.TrialPruned:
         return {"status": "pruned"}
     except Exception as e:
+        import traceback as _tb
+        print(f"\u274c [_run_trial_worker] ERROR: {e}\n{_tb.format_exc()}", flush=True)
         return {"status": "error", "error": str(e)}
 
 
@@ -464,22 +712,21 @@ def _objective_worker(
     data_dtype:   str,
     max_dd_limit: float,
     min_trades:   int,
+    spread_cost:  float = 0.0,
+    pip_value:    float = 1.0,   # ← pip_value per-asset (OIL=0.01, others=1.0)
 ) -> dict:
     """
-    Chạy trong subprocess riêng biệt (ProcessPoolExecutor worker).
-    Attach vào shared memory, chạy backtest, trả về dict result.
-    
-    Không nhận optuna.Trial trực tiếp (không serializable sang subprocess).
-    Thay vào đó nhận trial_params dict đã suggest sẵn từ orchestrator.
+    Subprocess worker: attach shared memory, run backtest, return results.
+    spread_cost + pip_value truyền từ asset_cfg để backtest sát thực tế.
     """
     try:
-        # Attach shared memory
         shm = shared_memory.SharedMemory(create=False, name=shm_name)
         data = np.ndarray(data_shape, dtype=np.dtype(data_dtype), buffer=shm.buf)
 
-        result = run_backtest_fast(data, trial_params)
-
-        shm.close()  # Không unlink — orchestrator quản lý lifecycle
+        result = run_backtest_fast(data, trial_params,
+                                   spread_cost=spread_cost,
+                                   pip_value=pip_value)
+        shm.close()
 
         return {
             "status":        "ok",
@@ -495,7 +742,10 @@ def _objective_worker(
     except optuna.exceptions.TrialPruned:
         return {"status": "pruned"}
     except Exception as e:
+        import traceback as _tb
+        print(f"\u274c [_objective_worker] ERROR: {e}\n{_tb.format_exc()}", flush=True)
         return {"status": "error", "error": str(e)}
+
 
 
 def _build_objective(
@@ -505,58 +755,67 @@ def _build_objective(
     max_dd_limit: float,
     min_trades:   int,
     executor:     ProcessPoolExecutor,
+    asset_cfg:    dict | None = None,   # ← NEW: dynamic search space per asset class
 ):
     """
     Factory trả về hàm objective cho optuna.study.optimize().
     Dùng ProcessPoolExecutor để submit task sang worker process.
     """
+    sp = asset_cfg if asset_cfg is not None else _ASSET_CLASS_DEFAULT
+
     def objective(trial: optuna.Trial) -> float:
+        # ── Suggest theo asset class search space ──────────────────────────
         params = {
-            "atr_sl_multiplier":    trial.suggest_float("atr_sl_multiplier",    0.8,  3.0),
-            "atr_lot_multiplier":   trial.suggest_float("atr_lot_multiplier",   0.005, 0.05),
-            "atr_fvg_buffer":       trial.suggest_float("atr_fvg_buffer",       0.3,  1.5),
-            "vsa_volume_ratio":     trial.suggest_float("vsa_volume_ratio",     1.2,  3.0),
-            "vsa_neighbor_ratio":   trial.suggest_float("vsa_neighbor_ratio",   1.1,  2.0),
-            "vsa_min_score":        trial.suggest_float("vsa_min_score",        0.3,  0.6),
-            "pinbar_wick_ratio":    trial.suggest_float("pinbar_wick_ratio",    0.50, 0.75),
-            "pinbar_body_ratio":    trial.suggest_float("pinbar_body_ratio",    0.10, 0.40),
-            "composite_score_gate": trial.suggest_float("composite_score_gate", 0.45, 0.75),
+            "atr_sl_multiplier":    trial.suggest_float("atr_sl_multiplier",    *sp["atr_sl_multiplier"]),
+            "atr_lot_multiplier":   trial.suggest_float("atr_lot_multiplier",   *sp["atr_lot_multiplier"]),
+            "atr_fvg_buffer":       trial.suggest_float("atr_fvg_buffer",       *sp["atr_fvg_buffer"]),
+            "vsa_volume_ratio":     trial.suggest_float("vsa_volume_ratio",     *sp["vsa_volume_ratio"]),
+            "vsa_neighbor_ratio":   trial.suggest_float("vsa_neighbor_ratio",   *sp["vsa_neighbor_ratio"]),
+            "vsa_min_score":        trial.suggest_float("vsa_min_score",        *sp["vsa_min_score"]),
+            "pinbar_wick_ratio":    trial.suggest_float("pinbar_wick_ratio",    *sp["pinbar_wick_ratio"]),
+            "pinbar_body_ratio":    trial.suggest_float("pinbar_body_ratio",    *sp["pinbar_body_ratio"]),
+            "composite_score_gate": trial.suggest_float("composite_score_gate", *sp["composite_score_gate"]),
         }
 
         future = executor.submit(
             _objective_worker,
             params, shm_name, data_shape, str(data_dtype),
             max_dd_limit, min_trades,
+            sp.get("spread_cost", 0.0),
+            sp.get("pip_value",   1.0),   # ← pip_value per-asset (OIL=0.01)
         )
-        res = future.result(timeout=120)  # 2-min timeout per trial
+
+        res = future.result(timeout=120)
 
         if res["status"] == "pruned":
             raise optuna.exceptions.TrialPruned()
         if res["status"] == "error":
             logger.warning(f"[Trial {trial.number}] Worker error: {res.get('error')}")
             raise optuna.exceptions.TrialPruned()
-
         if res["pruned"]:
             raise optuna.exceptions.TrialPruned()
 
-        # Hàm objective: WR^0.60 × PF^0.40 × dd_penalty
-        dd_penalty       = 1.0 - (res["max_drawdown"] / max_dd_limit) ** 2
-        composite_score  = (
-            (res["winrate"]       ** WR_WEIGHT) *
-            (res["profit_factor"] ** PF_WEIGHT) *
-            max(dd_penalty, 0.0)
+        # ── Scalping Fitness: WR×100 + PF×10 + trades×0.05 - DD_penalty×50 ─
+        dd_penalty  = res["max_drawdown"] / max_dd_limit   # 0→1
+        scalp_score = (
+            res["winrate"]       * SCALP_WR_WEIGHT    +
+            res["profit_factor"] * SCALP_PF_WEIGHT    +
+            res["trade_count"]   * SCALP_COUNT_WEIGHT -
+            dd_penalty           * 50.0
         )
 
         logger.debug(
-            f"[Trial {trial.number}] "
-            f"WR={res['winrate']:.3f} PF={res['profit_factor']:.3f} "
-            f"DD={res['max_drawdown']:.3f} trades={res['trade_count']} "
-            f"score={composite_score:.4f}"
+            f"[Trial {trial.number}] [{sp.get('label','?')}] "
+            f"WR={res['winrate']:.1%} PF={res['profit_factor']:.2f} "
+            f"DD={res['max_drawdown']:.1%} trades={res['trade_count']} "
+            f"score={scalp_score:.2f}"
         )
 
-        return composite_score
+        return scalp_score
 
     return objective
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -572,86 +831,73 @@ _OPT_CONTEXT: dict = {}
 
 def objective(trial: optuna.Trial) -> float:
     """
-    Hàm Objective chuẩn Optuna — top-level, picklable, dùng trực tiếp với study.optimize().
+    Scalping Fitness Function — ưu tiên Winrate và tần suất lệnh.
 
-    Khai báo toàn bộ không gian tham số (9 chiều) cho chiến lược SMC+VSA:
-        ─ ATR group    : atr_sl_multiplier, atr_lot_multiplier, atr_fvg_buffer
-        ─ VSA group    : vsa_volume_ratio, vsa_neighbor_ratio, vsa_min_score
-        ─ Pinbar group : pinbar_wick_ratio, pinbar_body_ratio
-        ─ Gate         : composite_score_gate
+    Score = WR×100 + PF×10 + trades×0.05 - DD_penalty×50
 
-    Score = WR^0.60 × PF^0.40 × dd_penalty
-        • dd_penalty = 1 − (max_dd / max_dd_limit)²
-        • TrialPruned ngay khi DD ≥ 15% hoặc trade_count < min_trades
-
-    Context phải được set trước (bởi run_optimization):
-        _OPT_CONTEXT = {
-            "data":          np.ndarray,   # Full M5 OHLCV
-            "max_dd_limit":  float,        # e.g. 0.15
-            "min_trades":    int,          # e.g. 200
-        }
+    Context (_OPT_CONTEXT):
+        data, max_dd_limit, min_trades, asset_cfg
     """
     ctx          = _OPT_CONTEXT
     data         = ctx["data"]
     max_dd_limit = ctx.get("max_dd_limit", DEFAULT_MAX_DD_LIMIT)
     min_trades   = ctx.get("min_trades",   DEFAULT_MIN_TRADES)
+    sp           = ctx.get("asset_cfg",    _ASSET_CLASS_DEFAULT)
 
-    # ── Suggest tham số (9 chiều) ──────────────────────────────────────────
+    # ── Suggest tham số theo asset class ─────────────────────────────────
     params = {
-        # ATR group — kiểm soát khoảng cách SL và kích thước FVG tối thiểu
-        "atr_sl_multiplier":    trial.suggest_float("atr_sl_multiplier",    0.8,  3.0),
-        "atr_lot_multiplier":   trial.suggest_float("atr_lot_multiplier",   0.005, 0.05),
-        "atr_fvg_buffer":       trial.suggest_float("atr_fvg_buffer",       0.3,  1.5),
-
-        # VSA group — ngưỡng lọc volume climax (2-layer filter)
-        "vsa_volume_ratio":     trial.suggest_float("vsa_volume_ratio",     1.2,  3.0),
-        "vsa_neighbor_ratio":   trial.suggest_float("vsa_neighbor_ratio",   1.1,  2.0),
-        "vsa_min_score":        trial.suggest_float("vsa_min_score",        0.3,  0.6),
-
-        # Pinbar group — tỷ lệ wick/body xác nhận đảo chiều
-        "pinbar_wick_ratio":    trial.suggest_float("pinbar_wick_ratio",    0.50, 0.75),
-        "pinbar_body_ratio":    trial.suggest_float("pinbar_body_ratio",    0.10, 0.40),
-
-        # Composite gate — ngưỡng tổng hợp để ra signal (SMC+VSA+Pinbar)
-        "composite_score_gate": trial.suggest_float("composite_score_gate", 0.45, 0.75),
+        "atr_sl_multiplier":    trial.suggest_float("atr_sl_multiplier",    *sp["atr_sl_multiplier"]),
+        "atr_lot_multiplier":   trial.suggest_float("atr_lot_multiplier",   *sp["atr_lot_multiplier"]),
+        "atr_fvg_buffer":       trial.suggest_float("atr_fvg_buffer",       *sp["atr_fvg_buffer"]),
+        "vsa_volume_ratio":     trial.suggest_float("vsa_volume_ratio",     *sp["vsa_volume_ratio"]),
+        "vsa_neighbor_ratio":   trial.suggest_float("vsa_neighbor_ratio",   *sp["vsa_neighbor_ratio"]),
+        "vsa_min_score":        trial.suggest_float("vsa_min_score",        *sp["vsa_min_score"]),
+        "pinbar_wick_ratio":    trial.suggest_float("pinbar_wick_ratio",    *sp["pinbar_wick_ratio"]),
+        "pinbar_body_ratio":    trial.suggest_float("pinbar_body_ratio",    *sp["pinbar_body_ratio"]),
+        "composite_score_gate": trial.suggest_float("composite_score_gate", *sp["composite_score_gate"]),
     }
 
-    # ── Chạy backtest vectorized ────────────────────────────────────────────
+    # ── Backtest ────────────────────────────────────────────────────
     try:
         result = run_backtest_fast(data, params)
     except optuna.exceptions.TrialPruned:
         raise
 
-    # ── Hard prune nếu không đủ điều kiện ──────────────────────────────────
-    if result.max_drawdown >= max_dd_limit or result.trade_count < min_trades:
+    # ── Hard prune: sai cả hai mục tiêu số lệnh───────────────────────────
+    if result.trade_count < min_trades:
+        raise optuna.exceptions.TrialPruned()
+    if result.max_drawdown >= max_dd_limit:
         raise optuna.exceptions.TrialPruned()
 
-    # ── Score tổng hợp: WR^0.60 × PF^0.40 × dd_penalty ───────────────────
-    dd_penalty      = 1.0 - (result.max_drawdown / max_dd_limit) ** 2
-    composite_score = (
-        (result.winrate       ** WR_WEIGHT) *
-        (result.profit_factor ** PF_WEIGHT) *
-        max(dd_penalty, 0.0)
+    # ── Scalping Fitness: WR×100 + PF×10 + trades×0.05 - DD_penalty×50 ───
+    # Mục tiêu WR>70% cho điểm cao nhất; số lệnh nhiều = thưởng thêm bonus
+    dd_penalty   = result.max_drawdown / max_dd_limit   # 0→1, càng cao càng trừ điểm
+    scalp_score  = (
+        result.winrate    * SCALP_WR_WEIGHT    +   # 0→100 (mục tiêu ≥70)
+        result.profit_factor * SCALP_PF_WEIGHT  +   # thưởng khả năng sinh lời
+        result.trade_count   * SCALP_COUNT_WEIGHT -  # thưởng tần suất lệnh cao
+        dd_penalty           * 50.0                  # phạt nặng nếu DD cao
     )
 
     logger.debug(
-        f"[Trial {trial.number}] "
-        f"WR={result.winrate:.3f} PF={result.profit_factor:.3f} "
-        f"DD={result.max_drawdown:.3f} trades={result.trade_count} "
-        f"score={composite_score:.4f}"
+        f"[Trial {trial.number}] [{sp.get('label','?')}] "
+        f"WR={result.winrate:.1%} PF={result.profit_factor:.2f} "
+        f"DD={result.max_drawdown:.1%} trades={result.trade_count} "
+        f"score={scalp_score:.2f}"
     )
 
-    return composite_score
+    return scalp_score
 
 
 def run_optimization(
-    data:         np.ndarray,
+    data:            np.ndarray,
     *,
-    n_trials:     int   = DEFAULT_N_TRIALS,
-    n_workers:    int   = DEFAULT_N_WORKERS,
-    max_dd_limit: float = DEFAULT_MAX_DD_LIMIT,
-    min_trades:   int   = DEFAULT_MIN_TRADES,
-    resume:       bool  = False,
+    n_trials:        int   = DEFAULT_N_TRIALS,
+    n_workers:       int   = DEFAULT_N_WORKERS,
+    max_dd_limit:    float = DEFAULT_MAX_DD_LIMIT,
+    min_trades:      int   = DEFAULT_MIN_TRADES,
+    resume:          bool  = False,
+    custom_db_path:  str | None = None,   # ← đường dẫn DB riêng khi chạy song song
 ) -> optuna.Study:
     """
     Entry point standalone để khởi chạy ML training loop.
@@ -681,7 +927,9 @@ def run_optimization(
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    storage_url = f"sqlite:///{STUDY_DB_PATH}"
+    # custom_db_path cho phép chạy song song nhiều file (mỗi file 1 DB)
+    _db = Path(custom_db_path) if custom_db_path else STUDY_DB_PATH
+    storage_url = f"sqlite:///{_db}"
     sampler     = optuna.samplers.TPESampler(seed=42, n_startup_trials=20)
     pruner      = optuna.pruners.MedianPruner(n_startup_trials=20, n_warmup_steps=0)
 
@@ -820,6 +1068,14 @@ def load_data_from_csv(
         if not reader.fieldnames:
             raise ValueError(f"CSV file is empty or missing header: {path}")
 
+        # MT5 exports 'tick_volume' — normalize to 'volume' trước khi validate
+        fieldnames = list(reader.fieldnames)
+        if "tick_volume" in fieldnames and "volume" not in fieldnames:
+            idx = fieldnames.index("tick_volume")
+            fieldnames[idx] = "volume"
+            reader.fieldnames = fieldnames
+            logger.debug("[DataLoad] Renamed column: tick_volume → volume")
+
         actual_cols = set(reader.fieldnames)
         missing = required_cols - actual_cols
         if missing:
@@ -831,8 +1087,17 @@ def load_data_from_csv(
 
         for row in reader:
             try:
+                # Cột time: hỗ trợ cả Unix timestamp (int/float) lẫn
+                # string datetime MT5 export ('2025-11-04 03:05:00')
+                raw_time = row["time"].strip()
+                try:
+                    t = float(raw_time)
+                except ValueError:
+                    t = datetime.strptime(raw_time, "%Y-%m-%d %H:%M:%S") \
+                               .replace(tzinfo=timezone.utc) \
+                               .timestamp()
                 rows.append([
-                    float(row["time"]),
+                    t,
                     float(row["open"]),
                     float(row["high"]),
                     float(row["low"]),
@@ -1154,14 +1419,21 @@ class OptimizationEngine:
         self.oos_hours     = cfg.get("shadow_deploy_hours",  DEFAULT_OOS_HOURS)
         self.promote_thr   = cfg.get("promote_threshold",    DEFAULT_PROMOTE_THR)
         self.resume        = resume
-        self.storage       = f"sqlite:///{STUDY_DB_PATH}"
+        self.custom_db     = cfg.get("study_db", None)        # override via CLI --study-db
+        _db                = Path(self.custom_db) if self.custom_db else STUDY_DB_PATH
+        self.storage       = f"sqlite:///{_db}"
 
     # ── Public API ──────────────────────────────────────────────────────────
 
-    def run(self, symbols: list[str]) -> OptimizationResult:
+    def run(self, symbols: list[str], *, data_path: str | None = None) -> OptimizationResult:
         """
         Entry point: fetch data, optimize, shadow deploy.
         Returns OptimizationResult với best params và shadow config path.
+
+        Args:
+            symbols:   Danh sách symbols dùng khi fetch từ MT5.
+            data_path: (LINUX-SAFE) Đường dẫn tới CSV. Nếu được truyền,
+                       dùng load_data_from_csv() — không cần MT5.
         """
         t_start = time.perf_counter()
         logger.info("=" * 70)
@@ -1171,11 +1443,26 @@ class OptimizationEngine:
         )
 
         # ── [Step 1] Fetch historical data ─────────────────────────────────
-        if DATA_CACHE_PATH.exists() and not self.resume:
+        if data_path is not None:
+            # LINUX-SAFE: load thẳng từ CSV — không cần MT5
+            logger.info(f"[MLEngine] --data override: loading CSV: {data_path}")
+            data = load_data_from_csv(data_path, logger=logger)
+        elif DATA_CACHE_PATH.exists() and not self.resume:
             logger.info(f"[MLEngine] Loading cached data: {DATA_CACHE_PATH}")
             data = np.load(DATA_CACHE_PATH)
         else:
             data = fetch_and_cache_data(symbols, self.lookback_days, logger=logger)
+
+        # Detect asset class → dynamic search space
+        asset_cfg     = detect_asset_class(data_path)
+        # Luôn dùng asset_cfg làm base — override chỉ khi user truyền CLI
+        effective_min = self._cli_min_trades if hasattr(self, "_cli_min_trades") else asset_cfg["min_trades"]
+        effective_dd  = self._cli_max_dd     if hasattr(self, "_cli_max_dd")     else asset_cfg["max_dd_limit"]
+        logger.info(
+            f"[MLEngine] Asset class: {asset_cfg['label']} | "
+            f"gate={asset_cfg['composite_score_gate']} | "
+            f"min_trades={effective_min} | max_dd={effective_dd:.0%}"
+        )
 
         logger.info(
             f"[MLEngine] Data ready | shape={data.shape} | "
@@ -1221,9 +1508,10 @@ class OptimizationEngine:
                         shm_name=shm_ctx.shm_name,
                         data_shape=data.shape,
                         data_dtype=str(data.dtype),
-                        max_dd_limit=self.max_dd_limit,
-                        min_trades=self.min_trades,
+                        max_dd_limit=effective_dd,
+                        min_trades=effective_min,
                         executor=executor,
+                        asset_cfg=asset_cfg,    # ← dynamic search space per symbol
                     )
                     logger.info(
                         f"[MLEngine] ProcessPoolExecutor started | "
@@ -1237,6 +1525,22 @@ class OptimizationEngine:
                     )
 
         # ── [Step 4] Validate best trial ────────────────────────────────────
+        n_pruned   = len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED])
+        n_complete = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
+
+        if n_complete == 0:
+            logger.error(
+                f"[MLEngine] ❌ ALL {n_pruned} trials pruned — 0 COMPLETE trials!\n"
+                f"  Asset class : {asset_cfg['label']}\n"
+                f"  min_trades  : {effective_min} | max_dd_limit: {effective_dd:.0%}\n"
+                f"  → Tiếp tục debug hoặc giảm bộ lọc trong ASSET_CLASS_CONFIG."
+            )
+            raise RuntimeError(
+                f"Optimization failed: all {n_pruned} trials pruned "
+                f"[{asset_cfg['label']}: min_trades={effective_min}, max_dd={effective_dd:.0%}]. "
+                f"Reduce constraints in ASSET_CLASS_CONFIG and retry."
+            )
+
         best = study.best_trial
         logger.info(
             f"[MLEngine] Optimization complete | "
@@ -1244,8 +1548,7 @@ class OptimizationEngine:
             f"params={best.params}"
         )
 
-        n_pruned   = len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED])
-        n_complete = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
+
 
         # Re-run best params để lấy full BacktestResult metrics
         try:
@@ -1286,6 +1589,11 @@ class OptimizationEngine:
             duration_sec=elapsed,
             shadow_path=shadow_path,
             created_at=datetime.now(timezone.utc).isoformat(),
+            best_winrate=float(best_metrics.winrate),
+            best_pf=float(best_metrics.profit_factor),
+            best_dd=float(best_metrics.max_drawdown),
+            best_trades=int(best_metrics.trade_count),
+            deploy_status=deploy_status,
         )
 
 
@@ -1332,10 +1640,23 @@ def _parse_args() -> argparse.Namespace:
         help=f"Override số Optuna trials (default: {DEFAULT_N_TRIALS} từ ml_config.json)",
     )
     parser.add_argument(
+        "--data",
+        type=str,
+        default=None,
+        help="Đường dẫn tới file data CSV (LINUX-SAFE, bỏ qua MT5). Ví dụ: data/history_XAUUSDm_M5.csv",
+    )
+    parser.add_argument(
         "--workers",
         type=int,
         default=None,
         help=f"Override số ProcessPoolExecutor workers (default: {DEFAULT_N_WORKERS})",
+    )
+    parser.add_argument(
+        "--min-trades",
+        type=int,
+        default=None,
+        help=f"Override số lệnh tối thiểu để trial valid (default: {DEFAULT_MIN_TRADES}). "
+             f"Giảm xuống 30-50 nếu strategy quá chặt.",
     )
     parser.add_argument(
         "--fetch",
@@ -1348,6 +1669,13 @@ def _parse_args() -> argparse.Namespace:
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Log level",
+    )
+    parser.add_argument(
+        "--study-db",
+        type=str,
+        default=None,
+        help="Custom SQLite DB path cho Optuna study (dùng khi chạy song song nhiều file — mỗi file 1 DB riêng). "
+             "Ví dụ: data/optuna_XAUUSDm.db",
     )
     return parser.parse_args()
 
@@ -1368,9 +1696,13 @@ def main() -> None:
         ml_cfg["n_trials"] = args.trials
     if args.workers is not None:
         ml_cfg["n_workers"] = args.workers
+    if args.min_trades is not None:
+        ml_cfg["min_trades"] = args.min_trades
     if args.fetch and DATA_CACHE_PATH.exists():
         DATA_CACHE_PATH.unlink()
         logger.info("[MLEngine] Cache cleared — will re-fetch from MT5")
+    if args.study_db is not None:
+        ml_cfg["study_db"] = args.study_db   # ← Custom DB path — parallel safe
 
     logger.info(
         f"[MLEngine] Starting | symbols={symbols} | "
@@ -1380,7 +1712,7 @@ def main() -> None:
     )
 
     engine = OptimizationEngine(ml_cfg, resume=args.resume)
-    result = engine.run(symbols)
+    result = engine.run(symbols, data_path=args.data)
 
     print("\n" + "=" * 60)
     print("✅ OPTIMIZATION COMPLETE")
@@ -1394,6 +1726,17 @@ def main() -> None:
     for k, v in result.best_params.items():
         print(f"   {k:<28} = {v:.6f}")
     print()
+
+    # ── SCANNER_RESULT: JSON dòng đơn để auto_scanner.py parse ───────────────────────
+    # Mỗi subprocess có stdout độc lập → KHÔNG race condition dù 5 file song song.
+    print("SCANNER_RESULT: " + json.dumps({
+        "score":   round(result.best_score,   4),
+        "winrate": round(result.best_winrate, 4),
+        "pf":      round(result.best_pf,      4),
+        "max_dd":  round(result.best_dd,      4),
+        "trades":  result.best_trades,
+        "deploy":  result.deploy_status,
+    }), flush=True)
 
 
 if __name__ == "__main__":
