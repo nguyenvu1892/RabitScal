@@ -1,0 +1,61 @@
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual Environment ──────────────────────────────────────────────────────
+venv/
+env/
+.venv/
+ENV/
+
+# ── DATA FILES — TUYỆT ĐỐI KHÔNG PUSH LÊN GIT ───────────────────────────────
+# Historical price data (CSV) — lưu local hoặc dùng cloud storage
+history_*.csv
+data/history_*.csv
+data/*.csv
+
+# Optuna study databases — chặn TOÀN BỘ ở mọi cấp thư mục
+*.db
+data/*.db
+config/*.db
+
+# Model checkpoint files
+*.pkl
+*.joblib
+*.h5
+*.pt
+*.pth
+
+# Config versions (ML output — lưu local, không push)
+config/versions/
+
+# ── LOGS — CHẶN TOÀN BỘ THƯ MỤC LOGS/ ───────────────────────────────────────
+logs/
+*.log
+nohup.out
+
+# ── IDE / OS ─────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── Test artifacts ────────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+data/optuna_ev05d_*.db

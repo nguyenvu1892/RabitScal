@@ -1,0 +1,13 @@
+{
+    "symbol": "EURUSDc",
+    "max_spread_pips": 3.0,
+    "max_retry": 3,
+    "retry_delay_sec": 0.5,
+    "order_timeout_sec": 10.0,
+    "atr_multiplier_sl": 1.5,
+    "risk_reward_ratio": 2.0,
+    "max_deviation_points": 10,
+    "magic_number": 20260305,
+    "trade_log_path": "data/trade_log.csv",
+    "log_dir": "logs"
+}

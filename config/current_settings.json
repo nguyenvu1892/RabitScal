@@ -1,0 +1,16 @@
+{
+  "version": 318,
+  "updated_at": "2026-03-07T07:04:28.768123+00:00",
+  "params": {
+    "atr_sl_multiplier": 0.8799497483511621,
+    "atr_lot_multiplier": 0.01009218368461409,
+    "atr_fvg_buffer": 0.29981991861090856,
+    "vsa_volume_ratio": 1.0061155561730246,
+    "vsa_neighbor_ratio": 1.0621746579733613,
+    "vsa_min_score": 0.2665615739539051,
+    "pinbar_wick_ratio": 0.399749829804867,
+    "pinbar_body_ratio": 0.2917371374502187,
+    "composite_score_gate": 0.18988316417750864,
+    "last_profit_factor": 1.6735
+  }
+}
