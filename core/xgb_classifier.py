@@ -28,7 +28,7 @@ log = logging.getLogger("XGBClassifier")
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-N_FEATURES     = 54      # Must match core/feature_engine.py N_FEATURES
+N_FEATURES     = 85      # Must match core/feature_engine.py N_FEATURES (V17.0)
 MODEL_DIR      = Path(__file__).resolve().parent.parent / "data" / "models"
 MIN_TRAIN_ROWS = 500     # Minimum candles needed to train
 
@@ -58,8 +58,8 @@ _CPU_PARAMS = {**_GPU_PARAMS, "device": "cpu", "n_jobs": -1}
 # Label map: model output → action string
 LABEL_MAP = {0: "HOLD", 1: "BUY", 2: "SELL"}
 
-# Confidence threshold: only emit BUY/SELL if confidence ≥ this
-MIN_CONFIDENCE = 0.55
+# Confidence threshold: only emit BUY/SELL if confidence >= this
+MIN_CONFIDENCE = 0.50    # Sep Vu 2026-03-17: lowered from 0.55 for faster entry
 
 
 # ── Classifier ────────────────────────────────────────────────────────────────
@@ -81,6 +81,8 @@ class RabitScalClassifier:
 
     def __init__(self):
         self._models: dict[str, object] = {}   # symbol → xgb.XGBClassifier
+        self._feature_names: list[str] | None = None   # 39 feature names từ pkl
+        self._feature_indices: list[int] | None = None  # column indices to select from 73-col input
         MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
     # ── Training ──────────────────────────────────────────────────────────────
@@ -168,6 +170,20 @@ class RabitScalClassifier:
             return {"action": "HOLD", "confidence": 0.0, "proba": [1.0, 0.0, 0.0]}
 
         x = feature_row.reshape(1, -1).astype(np.float32)
+
+        # Feature column filter: model được train với 39 features,
+        # nhưng feature_engine V16.0 nhả ra 73. Chỉ giữ đúng cột cần.
+        if self._feature_indices is not None:
+            if x.shape[1] > len(self._feature_indices):
+                x = x[:, self._feature_indices]
+        elif self._feature_names is not None:
+            n_expected = len(self._feature_names)
+            if x.shape[1] > n_expected:
+                log.debug(
+                    f"[XGB] Slicing input {x.shape[1]} cols → {n_expected} cols"
+                )
+                x = x[:, :n_expected]
+
         try:
             proba = model.predict_proba(x)[0]   # shape (3,): [P_HOLD, P_BUY, P_SELL]
         except Exception as e:
@@ -177,6 +193,13 @@ class RabitScalClassifier:
         label_idx   = int(np.argmax(proba))
         confidence  = float(proba[label_idx])
         action      = LABEL_MAP[label_idx]
+
+        # ── Sếp Vũ debug: in toàn bộ xác suất ra terminal ──
+        log.info(
+            f"[Prediction] {symbol} | "
+            f"HOLD: {proba[0]:.4f} | BUY: {proba[1]:.4f} | SELL: {proba[2]:.4f} | "
+            f"→ {action} (conf={confidence:.4f})"
+        )
 
         # Suppress low-confidence signals
         if action != "HOLD" and confidence < MIN_CONFIDENCE:
@@ -221,9 +244,95 @@ class RabitScalClassifier:
             return False
 
     def load_all(self, symbols: list[str]) -> int:
-        """Load models for all symbols. Returns count loaded."""
+        """
+        Load the UNIFIED model (xgb_all.pkl) and assign to ALL symbols.
+
+        RabitScal v2.1: Sếp Vũ trained ONE unified brain (xgb_all.pkl)
+        on combined multi-symbol data over 10 hours. This single model
+        is shared across all ALLOWED_SYMBOLS.
+
+        Falls back to per-symbol files ONLY if xgb_all.pkl doesn't exist
+        (legacy backward-compatibility).
+
+        Returns:
+            Number of symbols that now have a model loaded.
+        """
+        unified_path = MODEL_DIR / "xgb_all.pkl"
+
+        if unified_path.exists():
+            try:
+                with open(unified_path, "rb") as f:
+                    raw = pickle.load(f)
+
+                # xgb_all.pkl có thể là dict (vali đóng gói) hoặc raw model
+                if isinstance(raw, dict):
+                    log.info(f"[XGB] Pickle is a DICT — keys: {list(raw.keys())}")
+                    # Dò key chứa model thật
+                    _MODEL_KEYS = ("model", "clf", "booster", "estimator", "xgb")
+                    unified_model = None
+                    for k in _MODEL_KEYS:
+                        if k in raw:
+                            unified_model = raw[k]
+                            log.info(f"[XGB] Found model under key '{k}' → {type(unified_model).__name__}")
+                            break
+                    if unified_model is None:
+                        # Không tìm thấy key quen — thử value đầu tiên có predict_proba
+                        for k, v in raw.items():
+                            if hasattr(v, "predict_proba"):
+                                unified_model = v
+                                log.info(f"[XGB] Found model via predict_proba scan → key='{k}'")
+                                break
+                    if unified_model is None:
+                        log.error(f"[XGB] Cannot find model inside dict! Keys: {list(raw.keys())}")
+                        return 0
+                else:
+                    unified_model = raw
+                    log.info(f"[XGB] Pickle is raw model → {type(unified_model).__name__}")
+
+                # Assign the SAME model object to ALL symbols
+                for sym in symbols:
+                    self._models[sym] = unified_model
+
+                # Extract feature names for column filtering (39 vs 73)
+                feat_names = None
+                _FEAT_KEYS = ("features", "feature_names", "columns", "feature_cols")
+                if isinstance(raw, dict):
+                    for k in _FEAT_KEYS:
+                        if k in raw and isinstance(raw[k], (list, tuple)):
+                            feat_names = list(raw[k])
+                            log.info(f"[XGB] Feature names from pkl key '{k}': {len(feat_names)} features")
+                            break
+                if feat_names is None and hasattr(unified_model, "feature_names_in_"):
+                    feat_names = list(unified_model.feature_names_in_)
+                    log.info(f"[XGB] Feature names from model.feature_names_in_: {len(feat_names)} features")
+                if feat_names is None:
+                    # Last resort: check n_features
+                    n_expected = getattr(unified_model, "n_features_in_", None)
+                    if n_expected:
+                        log.info(f"[XGB] Model expects {n_expected} features (no names — will use first N cols)")
+                        self._feature_indices = list(range(n_expected))
+                    else:
+                        log.warning("[XGB] Cannot determine feature count — will pass all columns")
+                else:
+                    self._feature_names = feat_names
+                    log.info(f"[XGB] Feature list ({len(feat_names)}): {feat_names[:5]}...")
+
+                log.info(
+                    f"[XGB] Unified brain loaded: {unified_path} "
+                    f"→ assigned to {len(symbols)} symbols: {symbols}"
+                )
+                return len(symbols)
+            except Exception as e:
+                log.error(f"[XGB] Failed to load unified model {unified_path}: {e}")
+                return 0
+
+        # Fallback: per-symbol files (legacy — nếu chưa train unified)
+        log.warning(
+            f"[XGB] Unified model NOT found at {unified_path}. "
+            f"Falling back to per-symbol files (xgb_SYMBOL.pkl)..."
+        )
         loaded = sum(self.load_symbol(s) for s in symbols)
-        log.info(f"[XGB] Loaded {loaded}/{len(symbols)} models")
+        log.info(f"[XGB] Loaded {loaded}/{len(symbols)} per-symbol models (legacy)")
         return loaded
 
     @property

@@ -40,7 +40,7 @@ import numpy as np
 from core.data_pipeline   import DataPipeline
 from core.execution       import OrderManager
 from core.risk_manager    import RiskManager, TradeResult
-from core.strategy_engine import StrategyEngine, SignalResult
+# NOTE: strategy_engine.py has been permanently deleted (AI-First purge 2026-03-17)
 
 # Dashboard — import với fallback để bot vẫn chạy nếu dashboard bị lỗi
 try:

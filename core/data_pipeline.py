@@ -365,7 +365,7 @@ class DataPipeline:
         return self._running
 
     # ------------------------------------------------------------------
-    # Session filter (public — dùng bởi strategy_engine.py)
+    # Session filter (public -- used by AI pipeline)
     # ------------------------------------------------------------------
 
     def is_session_active(self, dt_utc: Optional[datetime] = None) -> bool:

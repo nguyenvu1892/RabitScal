@@ -40,19 +40,85 @@ ALLOWED_SYMBOLS: frozenset[str] = frozenset({
     "ETHUSD",
 })
 
-# Hardcoded lot sizes per symbol.
+# Hardcoded lot sizes per symbol (baseline — will be overridden by broker validation).
 # These values are IMMUTABLE — AI model output must never override these.
 LOT_MAP: dict[str, float] = {
-    "XAUUSD": 0.01,   # HARDCODED — micro-lot for safety (Sếp Vũ mandate)
+    "XAUUSD": 0.01,
     "US30":   0.01,
     "USTEC":  0.01,
     "BTCUSD": 0.01,
     "ETHUSD": 0.01,
 }
 
-# ATR multipliers for dynamic SL/TP
-SL_ATR_MULT  = 1.5   # SL = 1.5 × ATR
-TP_ATR_MULT  = 2.5   # TP = 2.5 × ATR   (RR ≈ 1:1.67)
+
+def validate_lot_with_broker(symbol: str, desired_lot: float) -> tuple[float | None, str]:
+    """
+    Query MT5 broker for volume_min / volume_max / volume_step and clamp lot.
+
+    Returns:
+        (final_lot, reason)
+        final_lot = None if order must be rejected (lot < broker min).
+    """
+    try:
+        import MetaTrader5 as mt5
+    except ImportError:
+        log.warning("[LotValidator] MetaTrader5 not installed — using LOT_MAP as-is")
+        return desired_lot, "mt5 not installed, fallback to LOT_MAP"
+
+    if not mt5.terminal_info():
+        # MT5 not initialized — try init
+        if not mt5.initialize():
+            log.warning("[LotValidator] MT5 not connected — using LOT_MAP as-is")
+            return desired_lot, "mt5 not connected, fallback to LOT_MAP"
+
+    info = mt5.symbol_info(symbol)
+    if info is None:
+        # Try with 'm' suffix (e.g. XAUUSDm on Exness)
+        info = mt5.symbol_info(symbol + "m")
+    if info is None:
+        log.warning(f"[LotValidator] symbol_info('{symbol}') returned None — using LOT_MAP")
+        return desired_lot, f"symbol_info unavailable for {symbol}"
+
+    min_lot  = info.volume_min
+    max_lot  = info.volume_max
+    step     = info.volume_step
+
+    log.info(
+        f"[LotValidator] {symbol}: broker min={min_lot}, max={max_lot}, "
+        f"step={step}, desired={desired_lot}"
+    )
+
+    # Clamp to [min_lot, max_lot]
+    final_lot = max(desired_lot, min_lot)
+    final_lot = min(final_lot, max_lot)
+
+    # Round DOWN to nearest volume_step
+    if step > 0:
+        final_lot = int(final_lot / step) * step
+        final_lot = round(final_lot, 10)  # fix float precision
+
+    # Final safety: if rounding pushed us below min_lot → REJECT
+    if final_lot < min_lot:
+        reason = (
+            f"REJECT: lot after rounding ({final_lot}) < broker min_lot ({min_lot}) "
+            f"for {symbol}. Risk too small for this symbol."
+        )
+        log.warning(f"[LotValidator] {reason}")
+        return None, reason
+
+    reason = (
+        f"lot={final_lot} (broker: min={min_lot}, max={max_lot}, step={step})"
+    )
+    if final_lot != desired_lot:
+        log.info(f"[LotValidator] {symbol}: adjusted {desired_lot} → {final_lot}")
+
+    return final_lot, reason
+
+# ATR multipliers — AI Dynamic Exit (Sep Vu 2026-03-17)
+# TP = 0 (DISABLED — AI handles exits via PositionTracker 3-layer logic)
+# SL = 5×ATR (EMERGENCY ONLY — safety net if bot crashes / loses connection)
+SL_ATR_MULT  = 5.0   # Emergency SL = 5 × ATR (far away, AI closes before this)
+TP_ATR_MULT  = 0.0   # TP disabled — AI Dynamic Exit manages profit taking
 
 # Minimum ATR value to guard against division-by-zero
 MIN_ATR = 0.0001
@@ -210,7 +276,7 @@ def build_order_msg(
 
     Format (matches MT5 EA ProcessOrder parser):
         {"type":"ORDER","id":"sig_...","action":"BUY","symbol":"XAUUSD",
-         "lot":0.01,"sl":2340.0,"tp":2360.0,"ticket":0}
+         "lot":0.01,"sl":2340.0,"tp":0,"ticket":0}
     """
     order_id = f"sig_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}"
     return {
@@ -224,6 +290,74 @@ def build_order_msg(
         "ticket":  0,
         "magic":   202603,
         "comment": comment,
+    }
+
+
+def build_exit_msg(
+    ticket: int,
+    symbol: str,
+    reason: str = "AI_EXIT",
+) -> dict:
+    """
+    Build CLOSE message — close entire position.
+
+    EA should: OrderSend with TRADE_ACTION_DEAL, opposite direction,
+    position=ticket, volume=full lot.
+    """
+    order_id = f"exit_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}"
+    return {
+        "type":    "ORDER",
+        "id":      order_id,
+        "action":  "CLOSE",
+        "ticket":  ticket,
+        "symbol":  symbol,
+        "comment": f"RabitScal_{reason}",
+    }
+
+
+def build_partial_close_msg(
+    ticket:  int,
+    symbol:  str,
+    volume:  float,
+    reason:  str = "SCALE_OUT",
+) -> dict:
+    """
+    Build CLOSE_PARTIAL message — close part of position.
+
+    EA should: OrderSend with TRADE_ACTION_DEAL, opposite direction,
+    position=ticket, volume=partial_volume.
+    """
+    order_id = f"pclose_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}"
+    return {
+        "type":    "ORDER",
+        "id":      order_id,
+        "action":  "CLOSE_PARTIAL",
+        "ticket":  ticket,
+        "symbol":  symbol,
+        "volume":  volume,
+        "comment": f"RabitScal_{reason}",
+    }
+
+
+def build_modify_sl_msg(
+    ticket: int,
+    symbol: str,
+    new_sl: float,
+) -> dict:
+    """
+    Build MODIFY message — move SL to break-even (entry price).
+
+    EA should: OrderSend with TRADE_ACTION_SLTP, position=ticket, sl=new_sl.
+    """
+    order_id = f"mod_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}"
+    return {
+        "type":    "ORDER",
+        "id":      order_id,
+        "action":  "MODIFY",
+        "ticket":  ticket,
+        "symbol":  symbol,
+        "sl":      new_sl,
+        "comment": "RabitScal_BREAKEVEN",
     }
 
 
@@ -277,11 +411,20 @@ def process_ai_signal(
         log.warning(f"[SignalEngine] {symbol} {action} BLOCKED: {reason}")
         return None
 
+    # Broker lot validation — query mt5.symbol_info() for real min/max/step
+    validated_lot, lot_reason = validate_lot_with_broker(symbol, signal["lot"])
+    if validated_lot is None:
+        log.warning(
+            f"[SignalEngine] {symbol} {action} BLOCKED (lot): {lot_reason}"
+        )
+        return None
+    signal["lot"] = validated_lot
+
     # Build ORDER message
     order_msg = build_order_msg(
         action  = signal["action"],
         symbol  = signal["symbol"],
-        lot     = signal["lot"],    # guaranteed = LOT_MAP value after RiskGuard
+        lot     = signal["lot"],    # guaranteed valid after broker validation
         sl      = signal["sl"],
         tp      = signal["tp"],
         comment = f"RabitScal_AI|conf={confidence:.2f}",
@@ -290,7 +433,7 @@ def process_ai_signal(
     log.info(
         f"[SignalEngine] SIGNAL OK: {action} {symbol} "
         f"lot={signal['lot']} SL={sl} TP={tp} "
-        f"conf={confidence:.2f} id={order_msg['id']}"
+        f"conf={confidence:.2f} | {lot_reason} | id={order_msg['id']}"
     )
 
     return order_msg

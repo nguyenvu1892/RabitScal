@@ -111,7 +111,7 @@ class RejectReason(str, Enum):
 @dataclass
 class TradeSignal:
     """
-    Tín hiệu giao dịch từ strategy_engine.py.
+    Tin hieu giao dich tu AI pipeline (feature_engine -> XGBoost).
 
     Attributes:
         direction   : "BUY" hoặc "SELL"
@@ -346,7 +346,7 @@ class OrderManager:
           5. _log_trade() → system.log + trade_log.csv
 
         Args:
-            signal: TradeSignal từ strategy_engine.py.
+            signal: TradeSignal from AI pipeline.
 
         Returns:
             OrderResult — dù thành công hay thất bại, luôn có đầy đủ thông tin.

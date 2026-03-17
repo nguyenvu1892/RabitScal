@@ -1,11 +1,11 @@
 """
-feature_engine.py — MTF Feature Engineering Layer v1.0
-=======================================================
-Module: RabitScal V12.0 — "Trở Về Bản Ngã AI" Campaign
+feature_engine.py -- MTF Feature Engineering Layer V17.0
+========================================================
+Module: RabitScal AI-First Architecture
 Author: Antigravity
-Date:   2026-03-07
+Date:   2026-03-17
 
-Triết lý: "Chỉ truyền Kiến Thức, không truyền Lệnh."
+Triet ly: "Chi truyen Kien Thuc, khong truyen Lenh."
 
 Nhiệm vụ:
     1. Nạp đồng thời dữ liệu M1 / M5 / M15 / H1 từ thư mục data/
@@ -87,7 +87,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_DIR     = PROJECT_ROOT / "data"
 LOGS_DIR     = PROJECT_ROOT / "logs"
 
-N_FEATURES   = 54    # V14.1: 54 features (index 0..53)
+N_FEATURES   = 85    # V17.0: 85 features (index 0..84)
+
 
 # Warm-up bars: bỏ qua N nến đầu để indicators ổn định (EMA200 cần ít nhất 200 bars)
 WARMUP_BARS  = 200
@@ -1229,6 +1230,172 @@ def _institutional_price(
     return np.clip(dist_abs / atr_safe, 0.0, 5.0).astype(np.float32)
 
 
+def _pa_advanced_patterns(
+    opens: np.ndarray,
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    atr: np.ndarray,
+) -> tuple[np.ndarray, ...]:
+    """
+    Advanced Price Action Patterns V17.0 -- 8 candlestick patterns.
+    All vectorized O(N). AI learns WHEN these patterns matter.
+
+    Output (8 float32 arrays, each 0/1):
+        bear_engulf, is_doji, is_outside_bar, is_inside_bar_m5,
+        is_hammer, is_shooting_star, is_morning_star, is_evening_star
+    """
+    N = len(closes)
+    total_range = np.maximum(highs - lows, 1e-10)
+    body = np.abs(closes - opens)
+    upper_wick = highs - np.maximum(closes, opens)
+    lower_wick = np.minimum(closes, opens) - lows
+    atr_safe = np.maximum(atr, 1e-10)
+
+    # Previous candle arrays
+    close_prev = np.roll(closes, 1); close_prev[0] = closes[0]
+    open_prev = np.roll(opens, 1); open_prev[0] = opens[0]
+    body_prev = np.abs(close_prev - open_prev)
+    high_prev = np.roll(highs, 1); high_prev[0] = highs[0]
+    low_prev = np.roll(lows, 1); low_prev[0] = lows[0]
+
+    # 1. Bear Engulfing: prev bull + current bear + current body > prev body
+    bear_engulf = (
+        (close_prev > open_prev) &
+        (closes < opens) &
+        (body > body_prev) &
+        (body_prev > atr_safe * 0.3)
+    ).astype(np.float32)
+
+    # 2. Doji: body < 10% of range
+    is_doji = (body / total_range < 0.10).astype(np.float32)
+
+    # 3. Outside Bar: current H > prev H AND current L < prev L
+    is_outside = np.zeros(N, dtype=np.float32)
+    is_outside[1:] = ((highs[1:] > high_prev[1:]) & (lows[1:] < low_prev[1:])).astype(np.float32)
+
+    # 4. Inside Bar M5: current H <= prev H AND current L >= prev L
+    is_inside = np.zeros(N, dtype=np.float32)
+    is_inside[1:] = ((highs[1:] <= high_prev[1:]) & (lows[1:] >= low_prev[1:])).astype(np.float32)
+
+    # 5. Hammer: bullish, lower wick >= 60% range, body in top 30%
+    close_pct = (closes - lows) / total_range
+    is_hammer = (
+        (lower_wick / total_range >= 0.60) &
+        (closes > opens) &
+        (close_pct >= 0.70) &
+        (body / total_range <= 0.35)
+    ).astype(np.float32)
+
+    # 6. Shooting Star: bearish, upper wick >= 60% range, body in bottom 30%
+    is_shooting = (
+        (upper_wick / total_range >= 0.60) &
+        (closes < opens) &
+        (close_pct <= 0.30) &
+        (body / total_range <= 0.35)
+    ).astype(np.float32)
+
+    # 7. Morning Star: 3-candle reversal up (bear + doji/small + bull)
+    is_morning = np.zeros(N, dtype=np.float32)
+    if N >= 3:
+        c_2 = np.roll(closes, 2); c_2[:2] = closes[:2]
+        o_2 = np.roll(opens, 2); o_2[:2] = opens[:2]
+        b_2 = np.abs(c_2 - o_2)
+        b_1 = body_prev
+        # Candle -2: bear, candle -1: small body, candle 0: bull
+        cond = (
+            (c_2 < o_2) &                          # Bar -2 bearish
+            (b_1 < atr_safe * 0.3) &                # Bar -1 small (doji-ish)
+            (closes > opens) &                      # Bar 0 bullish
+            (body > atr_safe * 0.3) &               # Bar 0 meaningful body
+            (closes > (c_2 + o_2) / 2)              # Close above midpoint of bar -2
+        )
+        is_morning[2:] = cond[2:].astype(np.float32)
+
+    # 8. Evening Star: 3-candle reversal down (bull + doji/small + bear)
+    is_evening = np.zeros(N, dtype=np.float32)
+    if N >= 3:
+        cond_eve = (
+            (c_2 > o_2) &                           # Bar -2 bullish
+            (b_1 < atr_safe * 0.3) &                # Bar -1 small
+            (closes < opens) &                      # Bar 0 bearish
+            (body > atr_safe * 0.3) &               # Bar 0 meaningful body
+            (closes < (c_2 + o_2) / 2)              # Close below midpoint of bar -2
+        )
+        is_evening[2:] = cond_eve[2:].astype(np.float32)
+
+    return bear_engulf, is_doji, is_outside, is_inside, is_hammer, is_shooting, is_morning, is_evening
+
+
+def _vsa_session_features(
+    volumes: np.ndarray,
+    atr: np.ndarray,
+    timestamps: np.ndarray,
+    sma_period: int = 20,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Advanced VSA Session Features V17.0 -- 4 volume intelligence features.
+    All vectorized.
+
+    Output:
+        vol_vs_prev:      V[i] / V[i-1] (continuous ratio)
+        session_vol_pctile: rolling percentile rank of volume in 50-bar window
+        vol_acceleration:  vol_sma5 / vol_sma20 (volume momentum)
+        session_vol_rank:  hour-based volume percentile (0-1)
+    """
+    N = len(volumes)
+    vol_safe = np.maximum(volumes, 1e-10).astype(np.float64)
+
+    # 1. Vol vs Previous candle (continuous ratio)
+    vol_prev = np.roll(vol_safe, 1); vol_prev[0] = vol_safe[0]
+    vol_vs_prev = np.clip(vol_safe / vol_prev, 0.0, 10.0).astype(np.float32)
+
+    # 2. Session Volume Percentile: rank vol[i] within rolling 50-bar window
+    window = 50
+    session_vol_pctile = np.full(N, 0.5, dtype=np.float32)
+    pad = np.full(window - 1, vol_safe[0])
+    padded_v = np.concatenate([pad, vol_safe])
+    wins = np.lib.stride_tricks.sliding_window_view(padded_v, window)
+    for i in range(N):
+        w = wins[i]
+        rank = np.sum(w <= vol_safe[i]) / window
+        session_vol_pctile[i] = float(np.clip(rank, 0.0, 1.0))
+
+    # 3. Volume Acceleration: vol_sma5 / vol_sma20 (momentum)
+    kernel5 = np.ones(5) / 5
+    kernel20 = np.ones(sma_period) / sma_period
+    vol_sma5 = np.convolve(vol_safe, kernel5, mode='same')
+    vol_sma20 = np.convolve(vol_safe, kernel20, mode='same')
+    vol_sma20 = np.maximum(vol_sma20, 1e-10)
+    vol_acceleration = np.clip(vol_sma5 / vol_sma20, 0.0, 5.0).astype(np.float32)
+
+    # 4. Session Volume Rank: volume percentile by hour-of-day
+    from datetime import datetime, timezone as _tz
+    hours = np.array([
+        datetime.fromtimestamp(float(ts), tz=_tz.utc).hour for ts in timestamps
+    ], dtype=np.int32)
+
+    # Build hour-based volume stats
+    session_vol_rank = np.full(N, 0.5, dtype=np.float32)
+    hour_volumes: dict[int, list[float]] = {}
+    for i in range(N):
+        h = int(hours[i])
+        if h not in hour_volumes:
+            hour_volumes[h] = []
+        hour_volumes[h].append(float(vol_safe[i]))
+    # Compute percentile for each bar within its hour bucket
+    hour_arrays = {h: np.array(vs) for h, vs in hour_volumes.items()}
+    hour_idx: dict[int, int] = {h: 0 for h in hour_volumes}
+    for i in range(N):
+        h = int(hours[i])
+        arr = hour_arrays[h]
+        if len(arr) > 1:
+            rank = np.sum(arr <= vol_safe[i]) / len(arr)
+            session_vol_rank[i] = float(np.clip(rank, 0.0, 1.0))
+
+    return vol_vs_prev, session_vol_pctile, vol_acceleration, session_vol_rank
+
+
 # ---------------------------------------------------------------------------
 # Main Feature Computation Function
 # ---------------------------------------------------------------------------
@@ -1392,6 +1559,15 @@ def compute_features(
         o5, h5, l5, c5, atr5, swing_lookback=10
     )
 
+    # V17.0 PA Advanced Patterns (8 new features)
+    bear_engulf5, doji5, outside5, inside5, hammer5, shooting5, morning5, evening5 = \
+        _pa_advanced_patterns(o5, h5, l5, c5, atr5)
+
+    # V17.0 VSA Session Features (4 new features)
+    vol_vs_prev5, vol_pctile5, vol_accel5, vol_rank5 = \
+        _vsa_session_features(v5, atr5, t5, sma_period=20)
+
+
     # Volume Engine V15.0
     relative_vol5, spread_norm5, effort_result5 = _vsa_features(
         h5, l5, v5, atr5, sma_period=20
@@ -1538,15 +1714,33 @@ def compute_features(
         hour_sin.astype(np.float32),               # 71 hour_sin
         hour_cos.astype(np.float32),               # 72 hour_cos
 
-    ], axis=1).astype(np.float32)   # shape (N5, 73)
+        # V17.0 PA Advanced Patterns (73..80)
+        bear_engulf5,                              # 73 is_bear_engulfing
+        doji5,                                     # 74 is_doji
+        outside5,                                  # 75 is_outside_bar
+        inside5,                                   # 76 is_inside_bar_m5
+        hammer5,                                   # 77 is_hammer
+        shooting5,                                 # 78 is_shooting_star
+        morning5,                                  # 79 is_morning_star
+        evening5,                                  # 80 is_evening_star
+
+        # V17.0 VSA Session Features (81..84)
+        vol_vs_prev5,                              # 81 vol_vs_prev_ratio
+        vol_pctile5,                               # 82 session_vol_percentile
+        vol_accel5,                                # 83 vol_acceleration
+        vol_rank5,                                 # 84 session_vol_rank
+
+    ], axis=1).astype(np.float32)   # shape (N5, 85)
+
 
     # ── Nan/Inf guard ────────────────────────────────────────────────────────
     features = np.nan_to_num(features, nan=0.0, posinf=10.0, neginf=-10.0)
 
     logger.info(
-        f"[compute_features] V16.0 Feature matrix: {features.shape} (73 features) | "
+        f"[compute_features] V17.0 Feature matrix: {features.shape} (85 features) | "
         f"dtype={features.dtype} | nan_count={np.isnan(features).sum()}"
     )
+
     return features, h1_inside_bar_a.astype(np.float32)
 
 
@@ -1633,14 +1827,21 @@ if __name__ == "__main__":
         "is_compression", "compression_score",
         "is_ib_fakeout", "is_bull_trap", "is_bear_trap", "is_opp_failure",
         # Volatility + Spread
+
         "volatility_index", "spread_cost_norm",
         # Time
         "hour_sin", "hour_cos",
+        # V17.0 PA Advanced
+        "is_bear_engulfing", "is_doji", "is_outside_bar", "is_inside_bar_m5",
+        "is_hammer", "is_shooting_star", "is_morning_star", "is_evening_star",
+        # V17.0 VSA Session
+        "vol_vs_prev_ratio", "session_vol_percentile", "vol_acceleration", "session_vol_rank",
     ]
     for i, name in enumerate(names):
         col = feats[:, i]
-        print(f"   [{i:2d}] {name:<30} μ={col.mean():+7.3f} σ={col.std():6.3f} "
+        print(f"   [{i:2d}] {name:<30} u={col.mean():+7.3f} s={col.std():6.3f} "
               f"[{col.min():+7.3f}, {col.max():+7.3f}]")
+
 
     print(f"\n{'='*60}")
     print(f"  ALL GOOD — Feature Engine V16.0 Ready! ({feats.shape[1]} features)")
